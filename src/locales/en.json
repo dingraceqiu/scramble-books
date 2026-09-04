@@ -71,6 +71,8 @@
     "favorite": "Save",
     "reduceHint": "Not interested — show less like this",
     "reduced": "Reduced",
+    "moreHint": "Loved it — show more like this",
+    "moreLiked": "Boosted",
     "cancelReduce": "Undo",
     "undoReduce": "Undo reduce",
     "continueEpisode": "Continue the story",

@@ -94,6 +94,30 @@ router.post('/api/classify-book', async (req, res) => {
 });
 
 /**
+ * 标题忠实度宽松校验：标题的实词必须能在原文里找到，防止 GLM「文不对题」。
+ * 中文按 CJK 2-gram 命中率、英文按单词命中率，阈值 0.5；不过关的结果直接丢弃（保留 mock 标题）。
+ */
+function titleGrounded(title: string, text: string): boolean {
+  const cjkRuns = title.match(/[一-鿿]{2,}/g) ?? [];
+  if (cjkRuns.length > 0) {
+    let hit = 0;
+    let total = 0;
+    for (const run of cjkRuns) {
+      for (let i = 0; i < run.length - 1; i++) {
+        total++;
+        if (text.includes(run.slice(i, i + 2))) hit++;
+      }
+    }
+    return total === 0 || hit / total >= 0.5;
+  }
+  const words = title.toLowerCase().match(/[a-z]{3,}/g) ?? [];
+  if (words.length === 0) return true;
+  const lower = text.toLowerCase();
+  const hit = words.filter((w) => lower.includes(w)).length;
+  return hit / words.length >= 0.5;
+}
+
+/**
  * AI 标题生成（GLM）。
  * body: { items: [{ id, text, coreSentence?, bookType? }] }
  * - text 是单元原文（作者原文，AI 只读不改）；标题铁律：claim 必须被原文支撑，绝不编造。
@@ -153,9 +177,15 @@ router.post('/api/ai-titles', async (req, res) => {
       res.json({ ok: false, error: 'GLM 返回无法解析', results: [] });
       return;
     }
+    const textById = new Map(cleaned.map((it) => [it.id, it.text]));
     const results = parsed
       .filter((r) => typeof r?.id === 'string' && typeof r?.title === 'string' && r.title.trim())
-      .map((r) => ({ id: r.id as string, title: (r.title as string).trim().slice(0, 60) }));
+      .map((r) => ({ id: r.id as string, title: (r.title as string).trim().slice(0, 60) }))
+      // 忠实度后校验：标题实词必须能在原文命中，文不对题的一律丢弃
+      .filter((r) => {
+        const text = textById.get(r.id);
+        return text ? titleGrounded(r.title, text) : false;
+      });
     res.json({ ok: results.length > 0, results, generator: glmModelName() });
   } catch (e) {
     res.json({ ok: false, error: (e as Error).message?.slice(0, 120), results: [] });

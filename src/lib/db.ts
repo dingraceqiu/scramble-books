@@ -126,8 +126,13 @@ export async function loadAll(): Promise<{
           typeof (u as ReadingUnit).titleSupport === 'string' ? (u as ReadingUnit).titleSupport : undefined;
         if (titleSupport) base.titleSupport = titleSupport;
 
-        // 已按最新生成器产出且有核心句则保留；旧版本用新生成器重算
-        const isLatest = base.ai?.generator === TITLE_GENERATOR && !!base.coreSentence;
+        // 生成代际判定：服务端模型（GLM 等）生成的标题永远视为最新，本地不再覆盖；
+        // 本地 mock 标题只有与当前生成器版本一致且带核心句才算最新，否则用当前 mock 重算。
+        // （此前只认 mock 版本号，导致 GLM 标题每次 hydrate 被打回 mock 再重调 API，反复翻转。）
+        const gen = base.ai?.generator ?? '';
+        const isLatest =
+          (!!gen && !gen.startsWith('mock')) ||
+          (gen === TITLE_GENERATOR && !!base.coreSentence);
         if (isLatest) return base;
         const book = bookById.get(base.bookId);
         const body = base.sourceText.includes('\n\n')

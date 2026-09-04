@@ -39,7 +39,7 @@ export function ReaderModal() {
   const articleRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [noteDraft, setNoteDraft] = useState('');
-  const [sel, setSel] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [sel, setSel] = useState<{ text: string; x: number; y: number; nodeIndex?: number } | null>(null);
 
   const unitHighlights = useMemo(
     () => highlights.filter((h) => h.unitId === readerId).sort((a, b) => b.createdAt - a.createdAt),
@@ -100,18 +100,32 @@ export function ReaderModal() {
       setSel(null);
       return;
     }
+    // 定位选区所在段落 → 映射回 SourceNode 下标（第 i 段 = sourceStart.startNode + i）。
+    // 补齐 Source Range 后，弹层里划的线/写的笔记才能在 Reader 原文位置回显、
+    // 且学习页可精确跳回原文。
+    const ancestor =
+      range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+        ? (range.commonAncestorContainer as Element)
+        : range.commonAncestorContainer.parentElement;
+    const block = ancestor?.closest('p, h3');
+    const blocks = articleRef.current.querySelectorAll('p, h3');
+    const pIdx = block ? Array.prototype.indexOf.call(blocks, block) : -1;
     const rect = range.getBoundingClientRect();
     const panelRect = scrollRef.current?.getBoundingClientRect();
     setSel({
       text: text.slice(0, 200),
       x: rect.left + rect.width / 2 - (panelRect?.left ?? 0),
       y: rect.top - (panelRect?.top ?? 0) + (scrollRef.current?.scrollTop ?? 0),
+      nodeIndex: pIdx >= 0 ? (unit.sourceStart.startNode ?? 0) + pIdx : undefined,
     });
   };
 
   const saveHighlight = () => {
     if (sel) {
-      addHighlight(unit.id, sel.text);
+      addHighlight(unit.id, sel.text, {
+        chapterId: unit.sourceStart.chapterId,
+        nodeIndex: sel.nodeIndex,
+      });
       window.getSelection()?.removeAllRanges();
       setSel(null);
     }
@@ -262,7 +276,10 @@ export function ReaderModal() {
                   type="button"
                   disabled={!noteDraft.trim()}
                   onClick={() => {
-                    addNote(unit.id, noteDraft);
+                    addNote(unit.id, noteDraft, undefined, {
+                      chapterId: unit.sourceStart.chapterId,
+                      nodeIndex: unit.sourceStart.startNode,
+                    });
                     setNoteDraft('');
                   }}
                   className="rounded-full bg-accent px-4 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-40"
@@ -315,6 +332,18 @@ export function ReaderModal() {
               className={`rounded-full p-2.5 transition-colors hover:bg-surface-2 ${isFav ? 'text-accent' : 'text-muted'}`}
             >
               <Heart size={19} fill={isFav ? 'currentColor' : 'none'} />
+            </button>
+            <button
+              type="button"
+              aria-label={fb === 1 ? t('card.moreLiked') : t('card.moreHint')}
+              title={fb === 1 ? t('card.moreLiked') : t('card.moreHint')}
+              onClick={() => feedback(unit.id, 1)}
+              className={`flex items-center gap-1 rounded-full px-2.5 py-2 text-xs font-medium transition-colors hover:bg-surface-2 ${
+                fb === 1 ? 'text-accent' : 'text-muted'
+              }`}
+            >
+              <Sparkles size={18} />
+              {fb === 1 && <span>{t('card.moreLiked')}</span>}
             </button>
             <button
               type="button"

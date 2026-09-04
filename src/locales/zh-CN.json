@@ -71,6 +71,8 @@
     "favorite": "收藏",
     "reduceHint": "不想看，减少此类推荐",
     "reduced": "已减少",
+    "moreHint": "很喜欢，多推荐此类",
+    "moreLiked": "已加推荐",
     "cancelReduce": "取消「减少推荐」",
     "undoReduce": "恢复推荐",
     "continueEpisode": "继续追更",
