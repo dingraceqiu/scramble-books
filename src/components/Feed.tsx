@@ -10,6 +10,7 @@ import type { FeedFilter, ReadingUnit } from '../types';
 const FILTERS: { key: FeedFilter }[] = [
   { key: 'all' },
   { key: 'unread' },
+  { key: 'read' },
   { key: 'favorites' },
 ];
 
@@ -52,6 +53,7 @@ export function Feed() {
     const kw = search.trim().toLowerCase();
     let candidates = units;
     if (filter === 'unread') candidates = units.filter((u) => !readSet.has(u.id));
+    if (filter === 'read') candidates = units.filter((u) => readSet.has(u.id));
     if (filter === 'favorites') candidates = units.filter((u) => marks.favorites[u.id]);
     if (kw) {
       candidates = candidates.filter((u) => {
@@ -169,11 +171,15 @@ export function Feed() {
 
       {ordered.length === 0 ? (
         <div className="py-20 text-center text-sm text-muted">
-          {filter === 'favorites'
-            ? t('feed.emptyFilter.favorites')
-            : filter === 'unread'
-              ? t('feed.emptyFilter.unread')
-              : t('feed.emptyFilter.search')}
+          {filter === 'favorites' ? (
+            t('feed.emptyFilter.favorites')
+          ) : filter === 'unread' ? (
+            t('feed.emptyFilter.unread')
+          ) : filter === 'read' ? (
+            t('feed.emptyFilter.read')
+          ) : (
+            t('feed.emptyFilter.search')
+          )}
         </div>
       ) : (
         <>

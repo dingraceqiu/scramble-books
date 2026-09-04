@@ -193,7 +193,7 @@ export interface ParsedBook {
   chapters: Chapter[];
 }
 
-export type FeedFilter = 'all' | 'unread' | 'favorites';
+export type FeedFilter = 'all' | 'unread' | 'read' | 'favorites';
 export type ViewName = 'feed' | 'library' | 'study' | 'reader';
 
 /** Reader 连续阅读定位锚点：定位到某章的某个原文节点 */

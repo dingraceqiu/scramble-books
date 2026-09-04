@@ -42,6 +42,7 @@
     "filters": {
       "all": "全部",
       "unread": "未读",
+      "read": "已读",
       "favorites": "收藏"
     },
     "searchPlaceholder": "搜索标题、书名或正文…",
@@ -53,6 +54,7 @@
     "emptyCta": "去上传我的第一本书",
     "emptyFilter": {
       "unread": "没有未读笔记了，你已经刷完啦。",
+      "read": "还没有已读笔记，先去刷一篇吧。",
       "favorites": "还没有收藏，点卡片上的爱心试试。",
       "search": "没有匹配的内容。"
     },

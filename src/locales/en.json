@@ -42,6 +42,7 @@
     "filters": {
       "all": "All",
       "unread": "Unread",
+      "read": "Read",
       "favorites": "Saved"
     },
     "searchPlaceholder": "Search titles, books, or text…",
@@ -53,6 +54,7 @@
     "emptyCta": "Upload my first book",
     "emptyFilter": {
       "unread": "No unread notes left — you've scrolled through them all.",
+      "read": "No read notes yet — go scroll through your first one.",
       "favorites": "Nothing saved yet. Tap the heart on a card to save it.",
       "search": "Nothing matches your search."
     },
