@@ -35,6 +35,8 @@ export default function App() {
           console.warn('[boot] cloud pull failed, continue with local data', e);
         }
       }
+      // 后台把遗留的 mock 标题升级为 GLM 真 AI 标题（静默降级，不阻塞界面）
+      useStore.getState().upgradeAiTitles();
     })();
   }, [hydrate]);
 

@@ -82,6 +82,9 @@ interface StoreState {
   setSearch: (s: string) => void;
   reshuffle: () => void;
 
+  /** 启动时后台升级：把仍是本地 mock 的标题批量换成 GLM 生成的真 AI 标题 */
+  upgradeAiTitles: () => void;
+
   openReader: (unitId: string, queue?: string[]) => void;
   closeReader: () => void;
   nextUnit: () => void;
@@ -382,6 +385,28 @@ export const useStore = create<StoreState>((set, get) => ({
   setFilter: (f) => set({ filter: f }),
   setSearch: (search) => set({ search }),
   reshuffle: () => set((s) => ({ feedSeed: s.feedSeed + 1 })),
+
+  upgradeAiTitles: () => {
+    const { units, books } = get();
+    // 找出仍有 mock 标题的书（generator 以 mock 开头），按书分组后逐本后台升级。
+    // 生成成功后 generator 变为 glm 模型名，下次启动不会再重复跑。
+    const mockByBook = new Map<string, ReadingUnit[]>();
+    for (const u of units) {
+      if (u.ai?.generator?.startsWith('mock')) {
+        const arr = mockByBook.get(u.bookId) ?? [];
+        arr.push(u);
+        mockByBook.set(u.bookId, arr);
+      }
+    }
+    for (const [bookId, mockUnits] of mockByBook) {
+      const book = books.find((b) => b.id === bookId);
+      if (!book) continue;
+      void generateAiTitlesForBook(bookId, mockUnits, book.bookType, (updated) => {
+        const byId = new Map(updated.map((u) => [u.id, u]));
+        set((s) => ({ units: s.units.map((u) => byId.get(u.id) ?? u) }));
+      });
+    }
+  },
 
   openReader: (unitId, queue) => {
     set({ readerId: unitId, readerQueue: queue ?? [unitId] });
