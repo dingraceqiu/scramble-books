@@ -429,6 +429,7 @@ export const useStore = create<StoreState>((set, get) => ({
       readSet,
       marks,
       bookTypeOf,
+      progress,
     );
     if (nextId) {
       set({ readerId: nextId, readerQueue: queue });

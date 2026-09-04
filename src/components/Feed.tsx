@@ -67,8 +67,15 @@ export function Feed() {
     }
     // feedSeed 作为洗牌种子参与排序：点「换一批」才重新洗牌，其余重算保持顺序稳定
     const bookTypeOf = (u: { bookId: string }) => bookMap.get(u.bookId)?.bookType;
-    return recommend(candidates, { readUnitIds: readSet, marks, candidates, bookTypeOf, seed: feedSeed });
-  }, [units, marks, filter, search, readSet, bookMap, feedSeed]);
+    return recommend(candidates, {
+      readUnitIds: readSet,
+      marks,
+      candidates,
+      bookTypeOf,
+      seed: feedSeed,
+      progress,
+    });
+  }, [units, marks, filter, search, readSet, bookMap, feedSeed, progress]);
 
   // 切换筛选 / 搜索 / 换一批时回到首批
   useEffect(() => {
