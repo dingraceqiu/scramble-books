@@ -27,6 +27,7 @@ import { pickNext, topicKeyOf } from '../lib/recommender';
 import { SAMPLE_FILENAME, SAMPLE_TEXT } from '../lib/sample';
 import { uid } from '../lib/utils';
 import { classifyBookOnline, type OnlineClassifyResult } from '../lib/bookClassifier';
+import { generateAiTitlesForBook } from '../lib/aiTitles';
 import i18n from '../i18n';
 
 export interface ProcessingTask {
@@ -214,6 +215,13 @@ export const useStore = create<StoreState>((set, get) => ({
       units: [...s.units, ...units],
       progress: { ...s.progress, [bookId]: { bookId, readUnitIds: [], updatedAt: Date.now() } },
     }));
+    // 异步生成真 AI 标题（GLM）：mock 标题先顶上，生成好一批替换一批，失败静默降级
+    if (units.length > 0) {
+      void generateAiTitlesForBook(bookId, units, type, (updated) => {
+        const byId = new Map(updated.map((u) => [u.id, u]));
+        set((s) => ({ units: s.units.map((u) => byId.get(u.id) ?? u) }));
+      });
+    }
     return book;
   },
 
@@ -352,6 +360,13 @@ export const useStore = create<StoreState>((set, get) => ({
         notes: s.notes.filter((n) => n.bookId !== bookId),
         progress: { ...s.progress, [bookId]: { bookId, readUnitIds: [], updatedAt: Date.now() } },
       }));
+      // 重切分后同样异步生成真 AI 标题
+      if (units.length > 0) {
+        void generateAiTitlesForBook(bookId, units, bookType, (updated) => {
+          const byId = new Map(updated.map((u) => [u.id, u]));
+          set((s) => ({ units: s.units.map((u) => byId.get(u.id) ?? u) }));
+        });
+      }
     } catch (err) {
       // 落库/更新失败：中止且不改动内存态，旧数据完整保留
       console.error('[setBookType] persist failed, aborting without state change', err);

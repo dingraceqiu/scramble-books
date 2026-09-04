@@ -9,6 +9,7 @@
  * 本模块运行在 Express 端（使用 coze-coding-dev-sdk 联网搜索，不暴露到前端）。
  */
 import { SearchClient, Config, HeaderUtils } from 'coze-coding-dev-sdk';
+import { glmAvailable, glmChat, glmModelName, extractJson } from './glm';
 
 export type OnlineBookType =
   | 'social_science'
@@ -202,6 +203,58 @@ async function fetchGoogleBooks(title: string, author: string): Promise<{
   }
 }
 
+/** 合法类型集合（GLM 返回值校验用） */
+const GLM_VALID_TYPES = new Set<string>([
+  'social_science', 'biography', 'history', 'fiction', 'philosophy', 'business', 'other',
+]);
+
+/**
+ * GLM 兜底裁决：规则投票证据不足时，把书名/作者/已有资料交给大模型判断。
+ * 自部署环境没有扣子搜索凭证、Google Books 也不可达，GLM 是唯一稳定的在线判定来源。
+ * 任何异常都返回 null（调用方继续走「判为未知」），绝不阻塞导入。
+ */
+async function glmClassify(
+  req: ClassifyRequest,
+  description: string | undefined,
+  evidence: string[],
+): Promise<OnlineBookType | null> {
+  if (!glmAvailable()) return null;
+  const typeGuide =
+    'social_science=社科/心理学/科普/自我成长; biography=人物传记/回忆录; history=历史/纪实; ' +
+    'fiction=小说/虚构文学; philosophy=哲学; business=商业/经济/管理; other=以上都不是/无法判断';
+  const lines = [
+    `书名：${req.title}`,
+    req.author ? `作者：${req.author}` : '',
+    req.subjects?.length ? `出版标注：${req.subjects.join(' / ')}` : '',
+    description ? `资料：${description.slice(0, 600)}` : '',
+  ].filter(Boolean);
+  try {
+    const raw = await glmChat(
+      [
+        {
+          role: 'system',
+          content:
+            '你是图书分类专家。根据书名、作者和资料判断这本书属于哪个类型。' +
+            `候选类型（格式 类型=含义）：${typeGuide}。` +
+            '宁可判 other 也不要把叙事散文/随笔集误判为小说。只输出 JSON：{"bookType":"...","reason":"一句话依据"}',
+        },
+        { role: 'user', content: lines.join('\n') },
+      ],
+      { temperature: 0.1, timeoutMs: 30000, maxTokens: 200 },
+    );
+    const parsed = extractJson<{ bookType?: string; reason?: string }>(raw);
+    const t = parsed?.bookType?.trim();
+    if (t && GLM_VALID_TYPES.has(t)) {
+      evidence.push(`GLM(${glmModelName()}) 判定：${t}（${parsed?.reason?.slice(0, 60) ?? ''}）`);
+      return t as OnlineBookType;
+    }
+    evidence.push('GLM 返回无法解析，放弃');
+  } catch (e) {
+    evidence.push(`GLM 调用失败：${(e as Error).message?.slice(0, 80)}`);
+  }
+  return null;
+}
+
 /**
  * 综合联网信息判定书籍类型。
  * @param headers Express 请求头（透传给 SDK 做链路追踪/鉴权）
@@ -288,15 +341,19 @@ export async function classifyBook(
   // 只有单一来源弱信号（1~3 分）判未知，宁可让用户手改也不乱标。
   const sorted = [...votes.entries()].sort((a, b) => b[1] - a[1]);
   if (sorted.length === 0 || sorted[0][1] < 5) {
-    evidence.push(`证据不足（最高票 ${sorted[0]?.[1] ?? 0} < 5），判为未知`);
+    evidence.push(`证据不足（最高票 ${sorted[0]?.[1] ?? 0} < 5），交由 GLM 裁决`);
+    const glmType = await glmClassify(req, description, evidence);
+    if (glmType) return { bookType: glmType, source: 'online', evidence, coverUrl, description };
     return { bookType: null, source: 'none', evidence, coverUrl, description };
   }
   const [topType, topScore] = sorted[0];
   const secondScore = sorted[1]?.[1] ?? 0;
   // 领先差阈值 2：体裁边界书（如"通俗历史小说"）若历史有史料定性加权（+4），
-  // 会自然以 ≥2 分胜出；平票则判未知交用户决定。
+  // 会自然以 ≥2 分胜出；平票则交 GLM 裁决。
   if (sorted.length > 1 && topScore - secondScore < 2) {
-    evidence.push(`票数接近（${topType}=${topScore} vs ${sorted[1][0]}=${secondScore}），证据不足判为未知`);
+    evidence.push(`票数接近（${topType}=${topScore} vs ${sorted[1][0]}=${secondScore}），交由 GLM 裁决`);
+    const glmType = await glmClassify(req, description, evidence);
+    if (glmType) return { bookType: glmType, source: 'online', evidence, coverUrl, description };
     return { bookType: null, source: 'none', evidence, coverUrl, description };
   }
   evidence.push(`最终投票：${topType}（${topScore} 分，领先 ${topScore - secondScore}）`);

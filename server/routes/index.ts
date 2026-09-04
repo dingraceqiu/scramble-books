@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { classifyBook } from '../lib/classify';
+import { glmAvailable, glmChat, glmModelName, extractJson } from '../lib/glm';
 import { authRouter, adminRouter, getAdminKey } from './auth';
 import { syncRouter } from './sync';
 import * as cloudDb from '../lib/cloudDb';
@@ -89,6 +90,75 @@ router.post('/api/classify-book', async (req, res) => {
       source: 'none',
       evidence: [`分类服务异常：${(e as Error).message?.slice(0, 120)}`],
     });
+  }
+});
+
+/**
+ * AI 标题生成（GLM）。
+ * body: { items: [{ id, text, coreSentence?, bookType? }] }
+ * - text 是单元原文（作者原文，AI 只读不改）；标题铁律：claim 必须被原文支撑，绝不编造。
+ * - 每次最多 8 条（批量一次请求），文本各截断至 1500 字控制 token。
+ * 返回 { results: [{ id, title }], generator }；GLM 未配置或失败时返回 ok:false，前端保留 mock 标题。
+ */
+router.post('/api/ai-titles', async (req, res) => {
+  if (!glmAvailable()) {
+    res.json({ ok: false, error: 'GLM_API_KEY 未配置', results: [] });
+    return;
+  }
+  const body = (req.body ?? {}) as { items?: unknown };
+  const items = Array.isArray(body.items) ? body.items : [];
+  const cleaned = items
+    .slice(0, 8)
+    .map((it, idx) => {
+      const o = (it ?? {}) as Record<string, unknown>;
+      const text = typeof o.text === 'string' ? o.text.slice(0, 1500) : '';
+      const core = typeof o.coreSentence === 'string' ? o.coreSentence.slice(0, 200) : '';
+      const bookType = typeof o.bookType === 'string' ? o.bookType : '';
+      return text.trim() ? { id: String(o.id ?? idx), text, core, bookType } : null;
+    })
+    .filter((x): x is { id: string; text: string; core: string; bookType: string } => x !== null);
+
+  if (cleaned.length === 0) {
+    res.json({ ok: false, error: '没有有效文本', results: [] });
+    return;
+  }
+
+  const listing = cleaned
+    .map(
+      (it, i) =>
+        `[${i}] id=${it.id} 类型=${it.bookType || '未知'}\n原文：${it.text}` +
+        (it.core ? `\n核心句（标题 claim 必须被它支撑）：${it.core}` : ''),
+    )
+    .join('\n\n');
+
+  try {
+    const raw = await glmChat(
+      [
+        {
+          role: 'system',
+          content:
+            '你是「刷书」App 的编辑，为用户导入的书摘单元写 Feed 卡片标题。铁律：\n' +
+            '1. 标题的核心 claim 必须能在原文中找到直接支撑，绝不引入原文没有的事实、名词或数字；\n' +
+            '2. 用原文的主要语言写标题（中文正文出中文标题，英文正文出英文标题）；\n' +
+            '3. 中文标题 8~18 字，英文标题不超过 10 个单词；像杂志笔记标题，吸引点击但不标题党；\n' +
+            '4. 不要用书名号、句号结尾，不要出现「本文」「这篇文章」这类词。\n' +
+            '只输出 JSON 数组：[{"id":"...","title":"..."}]',
+        },
+        { role: 'user', content: `请为以下 ${cleaned.length} 个单元各写一个标题：\n\n${listing}` },
+      ],
+      { temperature: 0.6, timeoutMs: 60000, maxTokens: 800 },
+    );
+    const parsed = extractJson<Array<{ id?: string; title?: string }>>(raw);
+    if (!Array.isArray(parsed)) {
+      res.json({ ok: false, error: 'GLM 返回无法解析', results: [] });
+      return;
+    }
+    const results = parsed
+      .filter((r) => typeof r?.id === 'string' && typeof r?.title === 'string' && r.title.trim())
+      .map((r) => ({ id: r.id as string, title: (r.title as string).trim().slice(0, 60) }));
+    res.json({ ok: results.length > 0, results, generator: glmModelName() });
+  } catch (e) {
+    res.json({ ok: false, error: (e as Error).message?.slice(0, 120), results: [] });
   }
 });
 
