@@ -89,6 +89,20 @@ export function Feed() {
     return () => io.disconnect();
   }, [ordered.length]);
 
+  // 注意：以下 useMemo 必须在「书架为空」的提前 return 之前调用，保证 hooks 顺序一致
+  const visible = ordered.slice(0, visibleCount);
+
+  // 稳定瀑布流：按序号轮转分配到固定栏。往下滑加载新卡片时，
+  // 已有卡片永远留在原位（CSS 多栏会在加卡片时重新平衡、导致卡片跳栏）。
+  const columns = useMemo(() => {
+    const cols: Array<Array<{ unit: ReadingUnit; gi: number }>> = Array.from(
+      { length: columnCount },
+      () => [],
+    );
+    visible.forEach((unit, i) => cols[i % columnCount].push({ unit, gi: i }));
+    return cols;
+  }, [visible, columnCount]);
+
   if (books.length === 0) {
     return (
       <div className="mx-auto flex max-w-md flex-col items-center px-6 py-24 text-center">
@@ -108,19 +122,6 @@ export function Feed() {
       </div>
     );
   }
-
-  const visible = ordered.slice(0, visibleCount);
-
-  // 稳定瀑布流：按序号轮转分配到固定栏。往下滑加载新卡片时，
-  // 已有卡片永远留在原位（CSS 多栏会在加卡片时重新平衡、导致卡片跳栏）。
-  const columns = useMemo(() => {
-    const cols: Array<Array<{ unit: ReadingUnit; gi: number }>> = Array.from(
-      { length: columnCount },
-      () => [],
-    );
-    visible.forEach((unit, i) => cols[i % columnCount].push({ unit, gi: i }));
-    return cols;
-  }, [visible, columnCount]);
 
   return (
     <div className="mx-auto max-w-6xl px-3 pb-28 pt-4 sm:px-6">
