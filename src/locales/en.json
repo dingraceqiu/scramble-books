@@ -134,6 +134,9 @@
     "statNotes": "Notes",
     "readingTime": "Reading time",
     "readingTimeNote": "Estimated total reading time (~400 CJK chars / min)",
+    "inProgressTitle": "Currently reading",
+    "unitProgress": "{{read}}/{{total}} notes",
+    "readNotesTitle": "Notes you've read",
     "quizComing": "Quizzes are coming soon",
     "quizBody": "After you finish a book, quizzes generated from your highlights, notes and reading units will appear here — turning \"scrolled past\" into \"remembered\".",
     "quizBadge": "MVP 3 · Stay tuned"

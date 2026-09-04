@@ -134,6 +134,9 @@
     "statNotes": "笔记",
     "readingTime": "阅读时长",
     "readingTimeNote": "估算累计阅读时间（按中文约 400 字/分钟）",
+    "inProgressTitle": "在读的书",
+    "unitProgress": "{{read}}/{{total}} 篇",
+    "readNotesTitle": "读过的笔记",
     "quizComing": "Quiz 自测即将上线",
     "quizBody": "读完书之后，这里会根据你的划线、笔记和阅读单元生成测验题，帮你把「刷过」变成「记住」。",
     "quizBadge": "MVP 3 · 敬请期待"
