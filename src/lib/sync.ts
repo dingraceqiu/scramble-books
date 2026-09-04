@@ -1,6 +1,6 @@
 /**
  * 云端同步引擎：
- * - 登录后 pullCloudData()：拉取云端快照。云端有数据 → 整库替换本地（以云端为准）后刷新页面；
+ * - 登录后 pullCloudData()：拉取云端快照。云端有数据 → 整库替换本地（以云端为准）后原地重新水合界面；
  *   云端为空 → 把本地现有数据推上去（首次登录迁移本地书库）。
  * - 登录期间本地任何改动 → schedulePush() 防抖 1.5s 推送整库快照（last-write-wins）。
  * - 登出时按用户选择保留或清空本地数据。
@@ -91,9 +91,19 @@ export async function pushNow(): Promise<void> {
 }
 
 /**
+ * 云端快照已写入本地持久层后，原地重新加载各内存 store。
+ * 注意：不要用 window.location.reload()——启动路径每次都会拉取云端，
+ * 「云端有数据 → 刷新」会形成无限刷新循环。
+ */
+export async function rehydrateAfterPull(): Promise<void> {
+  await useStore.getState().hydrate();
+  await useReaderPrefs.persist.rehydrate();
+}
+
+/**
  * 登录/注册成功后调用：
  * 1. 拉取云端快照；
- * 2. 云端有数据 → 写入本地（IndexedDB + 阅读偏好），返回 'replaced'（调用方刷新页面）；
+ * 2. 云端有数据 → 写入本地（IndexedDB + 阅读偏好），返回 'replaced'（调用方原地重新水合）；
  * 3. 云端为空 → 推送本地快照作为云端初始数据，返回 'uploaded'。
  */
 export async function pullCloudData(): Promise<'replaced' | 'uploaded' | 'empty'> {

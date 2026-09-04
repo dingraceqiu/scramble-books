@@ -8,7 +8,7 @@ import { Library } from './components/Library';
 import { Study } from './components/Study';
 import { ReaderModal } from './components/ReaderModal';
 import { ReaderView } from './components/ReaderView';
-import { startSyncSubscriptions, pullCloudData } from './lib/sync';
+import { startSyncSubscriptions, pullCloudData, rehydrateAfterPull } from './lib/sync';
 
 export default function App() {
   const { hydrated, view, hydrate } = useStore();
@@ -28,8 +28,9 @@ export default function App() {
       if (useAuth.getState().mode === 'cloud') {
         try {
           const result = await pullCloudData();
-          // 云端有数据并已替换本地 → 刷新让各 store（含阅读偏好）从持久层重新加载
-          if (result === 'replaced') window.location.reload();
+          // 云端有数据并已替换本地 → 原地重新加载各 store（含阅读偏好）。
+          // 这里不能整页 reload：启动每次都会拉取云端，刷新会造成无限循环。
+          if (result === 'replaced') await rehydrateAfterPull();
         } catch (e) {
           console.warn('[boot] cloud pull failed, continue with local data', e);
         }

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { User, Loader2, LogOut, Cloud, RefreshCw, AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../store/useAuth';
-import { pullCloudData, pushNow, clearLocalData } from '../lib/sync';
+import { pullCloudData, pushNow, clearLocalData, rehydrateAfterPull } from '../lib/sync';
 
 type Tab = 'login' | 'register';
 
@@ -97,10 +97,10 @@ function PanelContent({ onClose }: { onClose: () => void }) {
       } else {
         await signIn(email.trim(), password);
       }
-      // 登录/注册成功：拉取云端数据（云端有数据则替换本地并刷新页面）
+      // 登录/注册成功：拉取云端数据（云端有数据则替换本地并原地重新加载界面）
       const result = await pullCloudData();
       if (result === 'replaced') {
-        window.location.reload();
+        await rehydrateAfterPull();
       }
       onClose();
     } catch (e) {
