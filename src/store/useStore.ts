@@ -11,12 +11,16 @@ import {
   type FeedFilter,
   type Highlight,
   type HighlightColor,
+  type KnowledgePoint,
+  type LearningLevel,
   type Marks,
   type Note,
   type ParsedBook,
+  type ReadRange,
   type ReaderAnchor,
   type ReadingProgress,
   type ReadingUnit,
+  type QuizAttempt,
   type SourceDocument,
   type ViewName,
 } from '../types';
@@ -24,6 +28,16 @@ import * as db from '../lib/db';
 import { segmentBook, lastReadUnit } from '../lib/segmenter';
 import { parseFile, parseTxtText } from '../lib/parsers';
 import { pickNext, topicKeyOf } from '../lib/recommender';
+import { extractKnowledgePointsForBook } from '../lib/knowledge';
+import {
+  buildRangesByChapter,
+  coveredNodeCount,
+  deriveReadUnitIds,
+  isUnitRead,
+  mergeReadRanges,
+  rangesFromUnits,
+  unitSpans,
+} from '../lib/readState';
 import { SAMPLE_FILENAME, SAMPLE_TEXT } from '../lib/sample';
 import { uid } from '../lib/utils';
 import { classifyBookOnline, type OnlineClassifyResult } from '../lib/bookClassifier';
@@ -35,6 +49,36 @@ export interface ProcessingTask {
   name: string;
   status: 'parsing' | 'segmenting' | 'done' | 'error';
   message?: string;
+}
+
+/**
+ * Reading State 迁移/归一化：旧数据只有 readUnitIds（呈现层缓存），
+ * 还原为 readRanges（事实层），并把缓存重算成 ranges 的投影。
+ * 历史数据无法区分阅读入口，统一记 via='feed'。
+ */
+function migrateProgress(
+  progress: Record<string, ReadingProgress>,
+  units: ReadingUnit[],
+): Record<string, ReadingProgress> {
+  const out: Record<string, ReadingProgress> = {};
+  for (const p of Object.values(progress)) {
+    const bookUnits = units.filter((u) => u.bookId === p.bookId);
+    let ranges = Array.isArray(p.readRanges) ? p.readRanges : [];
+    if (ranges.length === 0 && (p.readUnitIds?.length ?? 0) > 0) {
+      ranges = rangesFromUnits(bookUnits, p.readUnitIds, p.updatedAt || Date.now());
+    }
+    ranges = mergeReadRanges(ranges);
+    const readUnitIds = deriveReadUnitIds(bookUnits, ranges);
+    const next: ReadingProgress = { ...p, readRanges: ranges, readUnitIds };
+    if (
+      JSON.stringify(ranges) !== JSON.stringify(p.readRanges ?? []) ||
+      readUnitIds.length !== (p.readUnitIds?.length ?? 0)
+    ) {
+      void db.putProgress(next);
+    }
+    out[p.bookId] = next;
+  }
+  return out;
 }
 
 interface StoreState {
@@ -61,7 +105,7 @@ interface StoreState {
   /** Reader 阅读页所在书的完整原文（Canonical Source Map），按需懒加载 */
   readerDoc: SourceDocument | null;
   /** 从哪个视图进入 Reader，退出时返回该视图 */
-  readerReturnView: 'feed' | 'library';
+  readerReturnView: 'feed' | 'library' | 'study';
 
   tasks: ProcessingTask[];
 
@@ -90,6 +134,10 @@ interface StoreState {
   nextUnit: () => void;
   /** 同书顺序下一篇（读完一章接着读下一章，绝不跳书） */
   nextUnitInBook: () => void;
+  /** 稍后再读：到明天凌晨 4 点前 Feed 不再展示该笔记（保持未读） */
+  snoozeUnit: (unitId: string) => void;
+  /** 弹层内阅读进度：null 表示清除（读完/重置） */
+  setPartialRead: (unitId: string, pct: number | null) => void;
 
   openBookReader: (
     bookId: string,
@@ -97,7 +145,18 @@ interface StoreState {
   ) => Promise<void>;
   closeBookReader: () => void;
 
-  markRead: (unitId: string) => void;
+  markRead: (unitId: string, via?: 'feed' | 'reader') => void;
+  /**
+   * Reader 连续阅读的已读上报：把一批可见原文节点写入 readRanges（事实层）。
+   * 一次上报批量合并成连续区间，只做一次写库与渲染。
+   */
+  markNodesRead: (
+    bookId: string,
+    nodes: Array<{ chapterId: string; nodeIndex: number }>,
+    via?: 'feed' | 'reader',
+  ) => void;
+  /** 向某本书的 Canonical Reading State 追加已读区间（合并去重） */
+  addReadRanges: (bookId: string, ranges: ReadRange[]) => void;
   toggleFavorite: (unitId: string) => void;
   feedback: (unitId: string, dir: 1 | -1) => void;
 
@@ -114,6 +173,26 @@ interface StoreState {
     opts?: { chapterId?: string; nodeIndex?: number },
   ) => void;
   removeNote: (id: string) => void;
+
+  // ---------- 学习层（Knowledge Point / Quiz / Mastery） ----------
+
+  knowledgePoints: KnowledgePoint[];
+  quizAttempts: QuizAttempt[];
+  /** KP 抽取进行中（Study 页展示生成状态） */
+  kpGenerating: boolean;
+  /**
+   * 为已读内容补齐知识点：只从 readRanges 完全覆盖的单元抽取（只考已读的硬规则），
+   * GLM 优先、本地兜底；已在 Study 页挂载时自动触发。
+   */
+  ensureKnowledgePoints: () => Promise<void>;
+  /** 记录一次作答；Mastery 一律由 Attempts 推导，不存总分 */
+  recordAttempt: (input: {
+    knowledgePointId: string;
+    bookId: string;
+    level: LearningLevel;
+    questionId: string;
+    correct: boolean;
+  }) => void;
 }
 
 /** 正在重切分的书 id（防重入：同一本书重切期间忽略后续类型切换点击） */
@@ -127,6 +206,9 @@ export const useStore = create<StoreState>((set, get) => ({
   highlights: [],
   notes: [],
   marks: db.DEFAULT_MARKS,
+  knowledgePoints: [],
+  quizAttempts: [],
+  kpGenerating: false,
 
   view: 'feed',
   filter: 'all',
@@ -148,7 +230,8 @@ export const useStore = create<StoreState>((set, get) => ({
     // 书库/Feed 显示空状态而非崩溃（书仍在 IndexedDB 里，可重新导入）。
     try {
       const data = await db.loadAll();
-      set({ ...data, hydrated: true });
+      const progress = migrateProgress(data.progress, data.units);
+      set({ ...data, progress, hydrated: true });
     } catch (err) {
       console.error('[hydrate] loadAll failed, starting with empty data', err);
       set({ hydrated: true });
@@ -218,7 +301,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set((s) => ({
       books: [...s.books, book],
       units: [...s.units, ...units],
-      progress: { ...s.progress, [bookId]: { bookId, readUnitIds: [], updatedAt: Date.now() } },
+      progress: { ...s.progress, [bookId]: { bookId, readRanges: [], readUnitIds: [], updatedAt: Date.now() } },
     }));
     // 异步生成真 AI 标题（GLM）：mock 标题先顶上，生成好一批替换一批，失败静默降级
     if (units.length > 0) {
@@ -363,7 +446,7 @@ export const useStore = create<StoreState>((set, get) => ({
         units: [...s.units.filter((u) => u.bookId !== bookId), ...units],
         highlights: s.highlights.filter((h) => h.bookId !== bookId),
         notes: s.notes.filter((n) => n.bookId !== bookId),
-        progress: { ...s.progress, [bookId]: { bookId, readUnitIds: [], updatedAt: Date.now() } },
+        progress: { ...s.progress, [bookId]: { bookId, readRanges: [], readUnitIds: [], updatedAt: Date.now() } },
       }));
       // 重切分后同样异步生成真 AI 标题
       if (units.length > 0) {
@@ -408,9 +491,10 @@ export const useStore = create<StoreState>((set, get) => ({
     }
   },
 
+  // 打开弹层不再自动计为已读：滚到底（弹层内 handleScroll）才写入已读区间，
+  // 避免「点进去看了一眼就退出」白白消耗未读状态。
   openReader: (unitId, queue) => {
     set({ readerId: unitId, readerQueue: queue ?? [unitId] });
-    get().markRead(unitId);
   },
   closeReader: () => set({ readerId: null, readerQueue: [] }),
 
@@ -431,10 +515,7 @@ export const useStore = create<StoreState>((set, get) => ({
       bookTypeOf,
       progress,
     );
-    if (nextId) {
-      set({ readerId: nextId, readerQueue: queue });
-      get().markRead(nextId);
-    }
+    if (nextId) set({ readerId: nextId, readerQueue: queue });
   },
 
   nextUnitInBook: () => {
@@ -447,10 +528,29 @@ export const useStore = create<StoreState>((set, get) => ({
       .sort((a, b) => a.order - b.order);
     const idx = bookUnits.findIndex((u) => u.id === readerId);
     const next = bookUnits[idx + 1];
-    if (next) {
-      set({ readerId: next.id, readerQueue: [next.id] });
-      get().markRead(next.id);
-    }
+    if (next) set({ readerId: next.id, readerQueue: [next.id] });
+  },
+
+  snoozeUnit: (unitId) => {
+    const marks = get().marks;
+    // 睡到明天凌晨 4 点：之后 Feed 恢复展示，期间保持未读
+    const until = new Date();
+    until.setDate(until.getDate() + 1);
+    until.setHours(4, 0, 0, 0);
+    const snoozedUntil = { ...(marks.snoozedUntil ?? {}), [unitId]: until.getTime() };
+    const next: Marks = { ...marks, snoozedUntil };
+    void db.putMarks(next);
+    set({ marks: next });
+  },
+
+  setPartialRead: (unitId, pct) => {
+    const marks = get().marks;
+    const partial = { ...(marks.partial ?? {}) };
+    if (pct === null) delete partial[unitId];
+    else partial[unitId] = Math.max(0, Math.min(100, Math.round(pct)));
+    const next: Marks = { ...marks, partial };
+    void db.putMarks(next);
+    set({ marks: next });
   },
 
   openBookReader: async (bookId, opts) => {
@@ -496,19 +596,64 @@ export const useStore = create<StoreState>((set, get) => ({
     }));
   },
 
-  markRead: (unitId) => {
-    const { units, progress } = get();
+  markRead: (unitId, via = 'feed') => {
+    const { units } = get();
     const unit = units.find((u) => u.id === unitId);
     if (!unit) return;
-    const cur = progress[unit.bookId] ?? { bookId: unit.bookId, readUnitIds: [], updatedAt: 0 };
-    if (cur.readUnitIds.includes(unitId)) return;
+    const now = Date.now();
+    const ranges: ReadRange[] = unitSpans(unit).map((s) => ({
+      chapterId: s.chapterId,
+      startNode: s.start,
+      endNode: s.end,
+      via,
+      at: now,
+    }));
+    if (ranges.length > 0) get().addReadRanges(unit.bookId, ranges);
+  },
+
+  markNodesRead: (bookId, nodes, via = 'reader') => {
+    if (!bookId || nodes.length === 0) return;
+    const byChapter = new Map<string, number[]>();
+    for (const n of nodes) {
+      if (!n || typeof n.chapterId !== 'string' || Number.isNaN(n.nodeIndex)) continue;
+      const arr = byChapter.get(n.chapterId);
+      if (arr) arr.push(n.nodeIndex);
+      else byChapter.set(n.chapterId, [n.nodeIndex]);
+    }
+    const now = Date.now();
+    const ranges: ReadRange[] = [];
+    for (const [chapterId, idxs] of byChapter) {
+      idxs.sort((a, b) => a - b);
+      let start = idxs[0];
+      let prev = idxs[0];
+      for (let i = 1; i <= idxs.length; i++) {
+        const cur = idxs[i];
+        if (cur !== prev + 1) {
+          ranges.push({ chapterId, startNode: start, endNode: prev, via, at: now });
+          start = cur;
+        }
+        prev = cur;
+      }
+    }
+    if (ranges.length > 0) get().addReadRanges(bookId, ranges);
+  },
+
+  addReadRanges: (bookId, incoming) => {
+    if (incoming.length === 0) return;
+    const { units, progress } = get();
+    const cur = progress[bookId] ?? { bookId, readRanges: [], readUnitIds: [], updatedAt: 0 };
+    const merged = mergeReadRanges([...cur.readRanges, ...incoming]);
+    // 覆盖没有扩大时不写库不触发渲染（Reader 滚动会频繁上报已见节点）
+    if (coveredNodeCount(merged) <= coveredNodeCount(cur.readRanges)) return;
+    const bookUnits = units.filter((u) => u.bookId === bookId);
     const next: ReadingProgress = {
-      ...cur,
-      readUnitIds: [...cur.readUnitIds, unitId],
+      bookId,
+      readRanges: merged,
+      readUnitIds: deriveReadUnitIds(bookUnits, merged),
       updatedAt: Date.now(),
     };
     void db.putProgress(next);
-    set((s) => ({ progress: { ...s.progress, [unit.bookId]: next } }));
+    set((s) => ({ progress: { ...s.progress, [bookId]: next } }));
   },
 
   toggleFavorite: (unitId) => {
@@ -593,16 +738,83 @@ export const useStore = create<StoreState>((set, get) => ({
     void db.deleteNote(id);
     set((s) => ({ notes: s.notes.filter((n) => n.id !== id) }));
   },
+
+  // ---------- 学习层 ----------
+
+  ensureKnowledgePoints: async () => {
+    const { units, progress, knowledgePoints, books } = get();
+    if (kpGeneratingGuard) return;
+    kpGeneratingGuard = true;
+    set({ kpGenerating: true });
+    try {
+      // 只考已读的硬规则：抽取范围 = readRanges 完全覆盖的单元
+      const byChapterByBook = new Map<string, Map<string, ReadRange[]>>();
+      for (const p of Object.values(progress)) {
+        byChapterByBook.set(
+          p.bookId,
+          buildRangesByChapter(p.readRanges ?? []),
+        );
+      }
+      for (const book of books) {
+        const byChapter = byChapterByBook.get(book.id) ?? new Map();
+        const readUnits = units.filter(
+          (u) => u.bookId === book.id && isUnitRead(u, byChapter),
+        );
+        if (readUnits.length === 0) continue;
+        const existing = knowledgePoints.filter((kp) => kp.bookId === book.id);
+        await extractKnowledgePointsForBook(book.id, readUnits, existing, (saved) => {
+          set((s) => ({
+            knowledgePoints: [...s.knowledgePoints, ...saved.filter(
+              (kp) => !s.knowledgePoints.some((old) => old.id === kp.id),
+            )],
+          }));
+        });
+      }
+    } catch (err) {
+      console.error('[study] ensureKnowledgePoints failed', err);
+    } finally {
+      kpGeneratingGuard = false;
+      set({ kpGenerating: false });
+    }
+  },
+
+  recordAttempt: (input) => {
+    const attempt: QuizAttempt = {
+      id: uid('att'),
+      knowledgePointId: input.knowledgePointId,
+      bookId: input.bookId,
+      level: input.level,
+      questionId: input.questionId,
+      correct: input.correct,
+      createdAt: Date.now(),
+    };
+    void db.putQuizAttempts([attempt]);
+    set((s) => ({ quizAttempts: [...s.quizAttempts, attempt] }));
+  },
 }));
 
-/** 派生：某书阅读覆盖率 0~1（按已读阅读单元数 / 总单元数；小说一章一单元）。 */
+/** ensureKnowledgePoints 防重入（store 外的模块级标记，避免并发全库扫描） */
+let kpGeneratingGuard = false;
+
+/**
+ * 派生：某书阅读覆盖率 0~1，全部从 readRanges（事实层）推导。
+ * - 有单元的书：已读区间完全覆盖的单元数 / 总单元数；
+ * - 无单元书（「其他」类只进 Reader）：已读节点数 / 全书节点数近似。
+ */
 export function coverageOf(
-  bookId: string,
+  book: Book,
   units: ReadingUnit[],
   progress: Record<string, ReadingProgress>,
 ): number {
-  const own = units.filter((u) => u.bookId === bookId);
-  if (own.length === 0) return 0;
-  const p = progress[bookId];
-  return (p?.readUnitIds.length ?? 0) / own.length;
+  const p = progress[book.id];
+  const own = units.filter((u) => u.bookId === book.id);
+  if (own.length > 0) {
+    if (!p) return 0;
+    const byChapter = buildRangesByChapter(p.readRanges ?? []);
+    const readCount = own.filter((u) => isUnitRead(u, byChapter)).length;
+    return readCount / own.length;
+  }
+  const ranges = p?.readRanges ?? [];
+  if (ranges.length === 0 || !book.nodeCount) return 0;
+  return Math.min(1, coveredNodeCount(ranges) / book.nodeCount);
 }

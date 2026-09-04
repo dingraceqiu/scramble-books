@@ -7,18 +7,22 @@
 import { openDB, type IDBPDatabase } from 'idb';
 import { generateAiMeta, TITLE_GENERATOR, getTargetLang } from './titleGen';
 import { hashStr, estimateReadingMinutes } from './utils';
+import { deriveReadUnitIds, rangesFromUnits } from './readState';
 import type {
   Book,
   Highlight,
+  KnowledgePoint,
   Marks,
   Note,
+  QuizAttempt,
   ReadingProgress,
   ReadingUnit,
   SourceDocument,
 } from '../types';
 
 const DB_NAME = 'inkread-db';
-const DB_VERSION = 1;
+/** v2：新增学习层 store（knowledgePoints / quizAttempts） */
+const DB_VERSION = 2;
 
 export const STORES = {
   books: 'books',
@@ -27,6 +31,8 @@ export const STORES = {
   progress: 'progress',
   highlights: 'highlights',
   notes: 'notes',
+  knowledgePoints: 'knowledgePoints',
+  quizAttempts: 'quizAttempts',
   kv: 'kv',
 } as const;
 
@@ -35,24 +41,51 @@ let dbPromise: Promise<IDBPDatabase> | null = null;
 function getDb(): Promise<IDBPDatabase> {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        db.createObjectStore(STORES.books, { keyPath: 'id' });
-        db.createObjectStore(STORES.documents, { keyPath: 'bookId' });
-        const units = db.createObjectStore(STORES.units, { keyPath: 'id' });
-        units.createIndex('bookId', 'bookId');
-        db.createObjectStore(STORES.progress, { keyPath: 'bookId' });
-        const hl = db.createObjectStore(STORES.highlights, { keyPath: 'id' });
-        hl.createIndex('unitId', 'unitId');
-        const notes = db.createObjectStore(STORES.notes, { keyPath: 'id' });
-        notes.createIndex('unitId', 'unitId');
-        db.createObjectStore(STORES.kv);
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore(STORES.books, { keyPath: 'id' });
+          db.createObjectStore(STORES.documents, { keyPath: 'bookId' });
+          const units = db.createObjectStore(STORES.units, { keyPath: 'id' });
+          units.createIndex('bookId', 'bookId');
+          db.createObjectStore(STORES.progress, { keyPath: 'bookId' });
+          const hl = db.createObjectStore(STORES.highlights, { keyPath: 'id' });
+          hl.createIndex('unitId', 'unitId');
+          const notes = db.createObjectStore(STORES.notes, { keyPath: 'id' });
+          notes.createIndex('unitId', 'unitId');
+          db.createObjectStore(STORES.kv);
+        }
+        if (oldVersion < 2) {
+          const kps = db.createObjectStore(STORES.knowledgePoints, { keyPath: 'id' });
+          kps.createIndex('bookId', 'bookId');
+          const attempts = db.createObjectStore(STORES.quizAttempts, { keyPath: 'id' });
+          attempts.createIndex('bookId', 'bookId');
+          attempts.createIndex('knowledgePointId', 'knowledgePointId');
+        }
       },
     });
   }
   return dbPromise;
 }
 
-export const DEFAULT_MARKS: Marks = { favorites: {}, unitFeedback: {}, bookScore: {}, topicScore: {} };
+export const DEFAULT_MARKS: Marks = { favorites: {}, unitFeedback: {}, bookScore: {}, topicScore: {}, snoozedUntil: {}, partial: {} };
+
+/** 旧格式进度迁移：缺 readRanges 时从 readUnitIds 推导（推送云端 / 落库前都必须经过这一步） */
+function normalizeProgress(
+  p: ReadingProgress,
+  unitsByBook: Map<string, ReadingUnit[]>,
+): ReadingProgress {
+  const bookUnits = unitsByBook.get(p.bookId) ?? [];
+  const readRanges =
+    Array.isArray(p.readRanges) && p.readRanges.length > 0
+      ? p.readRanges
+      : rangesFromUnits(bookUnits, p.readUnitIds ?? [], p.updatedAt || Date.now());
+  return {
+    bookId: p.bookId,
+    readRanges,
+    readUnitIds: deriveReadUnitIds(bookUnits, readRanges),
+    updatedAt: p.updatedAt ?? 0,
+  };
+}
 
 export async function loadAll(): Promise<{
   books: Book[];
@@ -61,15 +94,19 @@ export async function loadAll(): Promise<{
   highlights: Highlight[];
   notes: Note[];
   marks: Marks;
+  knowledgePoints: KnowledgePoint[];
+  quizAttempts: QuizAttempt[];
 }> {
   const db = await getDb();
-  const [books, units, progressList, highlights, notes, marks] = await Promise.all([
+  const [books, units, progressList, highlights, notes, marks, kps, attempts] = await Promise.all([
     db.getAll(STORES.books) as Promise<Book[]>,
     db.getAll(STORES.units) as Promise<ReadingUnit[]>,
     db.getAll(STORES.progress) as Promise<ReadingProgress[]>,
     db.getAll(STORES.highlights) as Promise<Highlight[]>,
     db.getAll(STORES.notes) as Promise<Note[]>,
     (db.get(STORES.kv, 'marks') as Promise<Marks | undefined>),
+    db.getAll(STORES.knowledgePoints) as Promise<KnowledgePoint[]>,
+    db.getAll(STORES.quizAttempts) as Promise<QuizAttempt[]>,
   ]);
   const progress: Record<string, ReadingProgress> = {};
   for (const p of progressList) progress[p.bookId] = p;
@@ -80,6 +117,8 @@ export async function loadAll(): Promise<{
         unitFeedback: marks.unitFeedback ?? {},
         bookScore: marks.bookScore ?? {},
         topicScore: marks.topicScore ?? {},
+        snoozedUntil: marks.snoozedUntil ?? {},
+        partial: marks.partial ?? {},
       }
     : DEFAULT_MARKS;
   // 旧书补齐 bookType（默认社科成长）
@@ -164,13 +203,27 @@ export async function loadAll(): Promise<{
       }
     })
     .filter((u): u is ReadingUnit => !!u && typeof u.id === 'string' && !!u.bookId);
+  // 旧格式进度迁移（readUnitIds → readRanges），放在单元归一化之后，保证推云快照与内存态一致
+  const unitsByBook = new Map<string, ReadingUnit[]>();
+  for (const u of normalizedUnits) {
+    const arr = unitsByBook.get(u.bookId);
+    if (arr) arr.push(u);
+    else unitsByBook.set(u.bookId, [u]);
+  }
+  const migratedProgress: Record<string, ReadingProgress> = {};
+  for (const p of Object.values(progress)) {
+    if (!p || typeof p.bookId !== 'string') continue;
+    migratedProgress[p.bookId] = normalizeProgress(p, unitsByBook);
+  }
   return {
     books: normalizedBooks.sort((a, b) => a.createdAt - b.createdAt),
     units: normalizedUnits.sort((a, b) => a.order - b.order || a.bookId.localeCompare(b.bookId)),
-    progress,
+    progress: migratedProgress,
     highlights,
     notes,
     marks: normalizedMarks,
+    knowledgePoints: kps,
+    quizAttempts: attempts,
   };
 }
 
@@ -189,6 +242,7 @@ export async function putBookWithContent(
   for (const u of units) await tx.objectStore(STORES.units).put(u);
   await tx.objectStore(STORES.progress).put({
     bookId: book.id,
+    readRanges: [],
     readUnitIds: [],
     updatedAt: Date.now(),
   } satisfies ReadingProgress);
@@ -203,7 +257,16 @@ export async function putDocument(document: SourceDocument): Promise<void> {
 export async function deleteBookCascade(bookId: string): Promise<void> {
   const db = await getDb();
   const tx = db.transaction(
-    [STORES.books, STORES.documents, STORES.units, STORES.progress, STORES.highlights, STORES.notes],
+    [
+      STORES.books,
+      STORES.documents,
+      STORES.units,
+      STORES.progress,
+      STORES.highlights,
+      STORES.notes,
+      STORES.knowledgePoints,
+      STORES.quizAttempts,
+    ],
     'readwrite',
   );
   await tx.objectStore(STORES.books).delete(bookId);
@@ -218,6 +281,13 @@ export async function deleteBookCascade(bookId: string): Promise<void> {
   const allNotes = (await noteStore.getAll()) as Note[];
   for (const h of allHl) if (h.bookId === bookId) await hlStore.delete(h.id);
   for (const n of allNotes) if (n.bookId === bookId) await noteStore.delete(n.id);
+  // 学习层：书删了，知识点与作答记录一并级联清理
+  const kpStore = tx.objectStore(STORES.knowledgePoints);
+  const kpKeys = await kpStore.index('bookId').getAllKeys(bookId);
+  for (const key of kpKeys) await kpStore.delete(key);
+  const attemptStore = tx.objectStore(STORES.quizAttempts);
+  const attemptKeys = await attemptStore.index('bookId').getAllKeys(bookId);
+  for (const key of attemptKeys) await attemptStore.delete(key);
   await tx.done;
 }
 
@@ -269,6 +339,7 @@ export async function replaceBookContent(input: {
   await tx.objectStore(STORES.documents).put(document);
   await tx.objectStore(STORES.progress).put({
     bookId: book.id,
+    readRanges: [],
     readUnitIds: [],
     updatedAt: Date.now(),
   } satisfies ReadingProgress);
@@ -368,6 +439,8 @@ export async function replaceAllData(input: {
   highlights: Highlight[];
   notes: Note[];
   marks: Marks;
+  knowledgePoints?: KnowledgePoint[];
+  quizAttempts?: QuizAttempt[];
 }): Promise<void> {
   const d = await getDb();
   const stores = [
@@ -377,24 +450,34 @@ export async function replaceAllData(input: {
     STORES.progress,
     STORES.highlights,
     STORES.notes,
+    STORES.knowledgePoints,
+    STORES.quizAttempts,
   ];
   const tx = d.transaction(stores, 'readwrite');
-  await Promise.all([
-    tx.objectStore(STORES.books).clear(),
-    tx.objectStore(STORES.documents).clear(),
-    tx.objectStore(STORES.units).clear(),
-    tx.objectStore(STORES.progress).clear(),
-    tx.objectStore(STORES.highlights).clear(),
-    tx.objectStore(STORES.notes).clear(),
-  ]);
+  await Promise.all(stores.map((name) => tx.objectStore(name).clear()));
   for (const b of input.books) await tx.objectStore(STORES.books).put(b);
   for (const doc of input.documents) await tx.objectStore(STORES.documents).put(doc);
   for (const u of input.units) await tx.objectStore(STORES.units).put(u);
+  // 云端旧格式进度迁移（readUnitIds → readRanges），与本地 loadAll 同一套规则
+  const unitsByBook = new Map<string, ReadingUnit[]>();
+  for (const u of input.units) {
+    const arr = unitsByBook.get(u.bookId);
+    if (arr) arr.push(u);
+    else unitsByBook.set(u.bookId, [u]);
+  }
   for (const p of Object.values(input.progress)) {
-    if (p && typeof p.bookId === 'string') await tx.objectStore(STORES.progress).put(p);
+    if (p && typeof p.bookId === 'string') {
+      await tx.objectStore(STORES.progress).put(normalizeProgress(p, unitsByBook));
+    }
   }
   for (const h of input.highlights) await tx.objectStore(STORES.highlights).put(h);
   for (const n of input.notes) await tx.objectStore(STORES.notes).put(n);
+  for (const kp of input.knowledgePoints ?? []) {
+    if (kp && typeof kp.id === 'string') await tx.objectStore(STORES.knowledgePoints).put(kp);
+  }
+  for (const a of input.quizAttempts ?? []) {
+    if (a && typeof a.id === 'string') await tx.objectStore(STORES.quizAttempts).put(a);
+  }
   await tx.done;
   // marks 存在 kv store（不参与上面的事务）
   await putMarks(input.marks);
@@ -410,9 +493,29 @@ export async function clearAllData(): Promise<void> {
     STORES.progress,
     STORES.highlights,
     STORES.notes,
+    STORES.knowledgePoints,
+    STORES.quizAttempts,
     STORES.kv,
   ];
   const tx = d.transaction(stores, 'readwrite');
   await Promise.all(stores.map((name) => tx.objectStore(name).clear()));
+  await tx.done;
+}
+
+// ---------- 学习层：知识点 / 作答记录 ----------
+
+/** 批量写入知识点（抽取流程分批回写） */
+export async function putKnowledgePoints(kps: KnowledgePoint[]): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(STORES.knowledgePoints, 'readwrite');
+  for (const kp of kps) await tx.objectStore(STORES.knowledgePoints).put(kp);
+  await tx.done;
+}
+
+/** 批量写入作答记录 */
+export async function putQuizAttempts(attempts: QuizAttempt[]): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction(STORES.quizAttempts, 'readwrite');
+  for (const a of attempts) await tx.objectStore(STORES.quizAttempts).put(a);
   await tx.done;
 }

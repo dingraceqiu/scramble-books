@@ -134,9 +134,33 @@ export interface ReadingUnit {
   };
 }
 
-/** 阅读进度：按书记录已读单元 */
+/**
+ * 已读区间：Reading State 的事实层记录（一段连续被读过的原文节点）。
+ * Feed / Reader / 覆盖率 / Quiz 出题范围全部以它为准。
+ */
+export interface ReadRange {
+  chapterId: string;
+  /** 章内节点下标闭区间 */
+  startNode: number;
+  endNode: number;
+  /** 主要读过该区间的入口：feed=Feed 弹层 / reader=Reader 连续阅读（供热力图区分来源） */
+  via: 'feed' | 'reader';
+  /** 最近一次确认已读的时间 */
+  at: number;
+}
+
+/** 阅读进度：按书记录已读原文区间 */
 export interface ReadingProgress {
   bookId: string;
+  /**
+   * Canonical Reading State：已读原文区间（同章内已合并）。
+   * 这是「我读过哪些原文」的唯一事实来源。
+   */
+  readRanges: ReadRange[];
+  /**
+   * 派生缓存：被 readRanges 完全覆盖的 ReadingUnit id。
+   * 仅供推荐器 / 统计等消费方使用，永远由 readRanges 推导，不单独写入。
+   */
   readUnitIds: string[];
   updatedAt: number;
 }
@@ -180,6 +204,10 @@ export interface Marks {
   bookScore: Record<string, number>;
   /** 主题级偏好分，按 topic（归一化章节主题）累加 */
   topicScore: Record<string, number>;
+  /** 稍后再读：unitId → 解除时间戳，到点前 Feed 不再展示该笔记 */
+  snoozedUntil?: Record<string, number>;
+  /** 弹层内阅读进度百分比 0~100（滚到底自动清除并标记已读） */
+  partial?: Record<string, number>;
 }
 
 /** 解析器输出：元信息 + 章节原文 */
@@ -266,12 +294,74 @@ export interface CloudSnapshot {
   highlights: Highlight[];
   notes: Note[];
   marks: Marks;
+  /** 学习层数据（可选：旧客户端会忽略未知字段） */
+  knowledgePoints?: KnowledgePoint[];
+  quizAttempts?: QuizAttempt[];
   readerPrefs: {
     settings?: unknown;
     bookmarks?: unknown;
     positions?: unknown;
     highlightColor?: unknown;
   };
+}
+
+// ---------- Learning Foundation（学习层） ----------
+
+/**
+ * 学习层级（构想第十八节）。0=Exposure 不设题目——「看过」由 Reading State 表达；
+ * 题目从 Level 1（Recall）起步，2/3/4 在数据模型上预留。
+ */
+export type LearningLevel = 1 | 2 | 3 | 4;
+
+/**
+ * 知识点：学习层对象。必须能一路追溯回
+ * Book → Chapter → SourceNode / SourceRange（架构铁律）。
+ * 只允许从已读 Source Range 抽取（Quiz 只考已读内容的硬规则）。
+ */
+export interface KnowledgePoint {
+  id: string;
+  bookId: string;
+  chapterId: string;
+  /** 来源原文区间（供出题依据与「查看原文」回跳） */
+  sourceRanges: SourceRange[];
+  /** 概念短语（如「参考群体影响社会比较」） */
+  concept: string;
+  /** 解释：优先原文原句或忠实转述，绝不引入原文没有的 claim */
+  explanation: string;
+  /** 支撑原文核心句（逐字摘录） */
+  quote?: string;
+  /** 主题 key（与推荐器 topicKeyOf 同一归一化口径，供跨书聚合） */
+  topic?: string;
+  /** 生成器标识（mock-kp-v1 / GLM 模型名），可追溯、可重算 */
+  generatedBy: string;
+  createdAt: number;
+}
+
+/** 测验题：知识点的一种测试方式（题目本身不承载事实，事实在 KP 的 sourceRanges 里） */
+export interface QuizQuestion {
+  id: string;
+  knowledgePointId: string;
+  bookId: string;
+  level: LearningLevel;
+  type: 'choice';
+  question: string;
+  options: string[];
+  answerIndex: number;
+  /** 出题依据（原文句），答完可回看 */
+  evidence?: string;
+  generatedBy: string;
+  createdAt: number;
+}
+
+/** 一次作答记录。Mastery 由 Attempts 推导，绝不存「masteryScore=82」这类单一总分 */
+export interface QuizAttempt {
+  id: string;
+  knowledgePointId: string;
+  bookId: string;
+  level: LearningLevel;
+  questionId: string;
+  correct: boolean;
+  createdAt: number;
 }
 
 /** 服务器返回的会话用户信息 */

@@ -60,7 +60,8 @@
     },
     "nextNote": "下一条",
     "nextInBook": "继续读这本书",
-    "nextRandom": "随机下一条"
+    "nextRandom": "随机下一条",
+    "partialHint": "上次读到 {{pct}}%"
   },
   "card": {
     "note": "NOTE {{index}}",
@@ -73,6 +74,8 @@
     "reduced": "已减少",
     "moreHint": "很喜欢，多推荐此类",
     "moreLiked": "已加推荐",
+    "snooze": "今天不想读",
+    "snoozeHint": "保持未读，明天再刷到这篇",
     "cancelReduce": "取消「减少推荐」",
     "undoReduce": "恢复推荐",
     "continueEpisode": "继续追更",
@@ -257,5 +260,21 @@
     "errPasswordMismatch": "两次输入的密码不一致",
     "errInviteRequired": "请输入邀请码",
     "errGeneric": "操作失败，请稍后重试"
+  },
+  "quiz": {
+    "sectionTitle": "知识点与测验",
+    "kpCount": "知识点",
+    "recallRate": "Recall 正确率",
+    "attempts": "作答次数",
+    "noKp": "读几篇之后，这里会自动从你读过的原文中提炼知识点。",
+    "generating": "正在从你读过的原文提炼知识点…",
+    "start": "开始测验（Level 1 · Recall）",
+    "next": "下一题",
+    "finish": "本轮完成，再来一轮",
+    "correct": "答对了",
+    "wrong": "答错了",
+    "evidence": "原文依据",
+    "viewSource": "查看原文",
+    "recallQuestion": "关于「{{concept}}」，哪一句是作者的原文表述？"
   }
 }

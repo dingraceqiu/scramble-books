@@ -1,7 +1,9 @@
-import { GraduationCap, Highlighter, StickyNote, Flame, BookOpen, ChevronRight } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { GraduationCap, Highlighter, StickyNote, Flame, BookOpen, ChevronRight, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/useStore';
 import { estimateReadingMinutes, cn } from '../lib/utils';
+import { buildRecallQuestion, masteryByLevel } from '../lib/knowledge';
 import { BookCover } from './BookCover';
 
 export function Study() {
@@ -254,20 +256,232 @@ export function Study() {
         </>
       )}
 
-      {/* Quiz 占位 */}
-      <div
-        className={cn(
-          'relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#f3e7d3] to-[#f6ddd0] p-8 text-center',
-          'dark:from-[#2e261c] dark:to-[#33261f]',
-        )}
-      >
-        <GraduationCap size={40} className="mx-auto mb-4 text-[#e85d2c]" />
-        <h2 className="reading-text mb-2 text-lg font-bold text-ink">{t('study.quizComing')}</h2>
-        <p className="mx-auto max-w-sm text-sm leading-relaxed text-muted">{t('study.quizBody')}</p>
-        <span className="mt-5 inline-block rounded-full bg-[#e85d2c] px-5 py-2 text-sm font-medium text-white">
-          {t('study.quizBadge')}
-        </span>
+      {/* 知识点与测验（Learning Foundation：Source → KP → Level → Attempt → Mastery） */}
+      <QuizSection />
+    </div>
+  );
+}
+
+/** 一道进行中的题（由 buildRecallQuestion 生成） */
+interface ActiveQuestion {
+  id: string;
+  knowledgePointId: string;
+  bookId: string;
+  level: 1 | 2 | 3 | 4;
+  question: string;
+  options: string[];
+  answerIndex: number;
+  evidence: string;
+}
+
+/** Level 1（Recall）最小测验闭环：只考已读内容，每道题可回到原文 */
+function QuizSection() {
+  const { t } = useTranslation();
+  const kps = useStore((s) => s.knowledgePoints);
+  const attempts = useStore((s) => s.quizAttempts);
+  const kpGenerating = useStore((s) => s.kpGenerating);
+  const books = useStore((s) => s.books);
+  const hasAnyRead = useStore((s) =>
+    Object.values(s.progress).some((p) => (p.readRanges?.length ?? 0) > 0),
+  );
+  const ensureKnowledgePoints = useStore((s) => s.ensureKnowledgePoints);
+  const recordAttempt = useStore((s) => s.recordAttempt);
+  const openBookReader = useStore((s) => s.openBookReader);
+
+  const [round, setRound] = useState<ActiveQuestion[]>([]);
+  const [qIdx, setQIdx] = useState(0);
+  const [picked, setPicked] = useState<number | null>(null);
+
+  // 进入学习页自动补齐知识点（只从已读原文抽取；无读取时静默跳过）
+  useEffect(() => {
+    if (hasAnyRead && kps.length === 0 && !kpGenerating) {
+      void ensureKnowledgePoints();
+    }
+  }, [hasAnyRead, kps.length, kpGenerating, ensureKnowledgePoints]);
+
+  const bookTitle = useMemo(() => new Map(books.map((b) => [b.id, b.title])), [books]);
+  const recall = masteryByLevel(attempts)[1];
+
+  const startRound = () => {
+    const candidates = [...kps].sort(() => Math.random() - 0.5);
+    const qs: ActiveQuestion[] = [];
+    for (const kp of candidates) {
+      if (qs.length >= 5) break;
+      const q = buildRecallQuestion(kp, kps);
+      if (q) qs.push(q);
+    }
+    setRound(qs);
+    setQIdx(0);
+    setPicked(null);
+  };
+
+  const answer = (i: number) => {
+    const q = round[qIdx];
+    if (!q || picked !== null) return;
+    setPicked(i);
+    recordAttempt({
+      knowledgePointId: q.knowledgePointId,
+      bookId: q.bookId,
+      level: q.level,
+      questionId: q.id,
+      correct: i === q.answerIndex,
+    });
+  };
+
+  const current = round[qIdx] ?? null;
+  const kpById = useMemo(() => new Map(kps.map((k) => [k.id, k])), [kps]);
+  const currentKp = current ? kpById.get(current.knowledgePointId) : undefined;
+
+  return (
+    <div className="mb-10">
+      <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.2em] text-muted">
+        {t('quiz.sectionTitle')}
+      </p>
+
+      {/* 掌握度概览（Coverage 与 Mastery 分开：这里只看 Mastery） */}
+      <div className="mb-3 grid grid-cols-3 gap-3">
+        <div className="rounded-2xl bg-surface p-4 shadow-sm ring-1 ring-line">
+          <p className="reading-text text-2xl font-bold text-ink">{kps.length}</p>
+          <p className="text-xs text-muted">{t('quiz.kpCount')}</p>
+        </div>
+        <div className="rounded-2xl bg-surface p-4 shadow-sm ring-1 ring-line">
+          <p className="reading-text text-2xl font-bold text-ink">
+            {recall.rate === null ? '–' : `${Math.round(recall.rate * 100)}%`}
+          </p>
+          <p className="text-xs text-muted">{t('quiz.recallRate')}</p>
+        </div>
+        <div className="rounded-2xl bg-surface p-4 shadow-sm ring-1 ring-line">
+          <p className="reading-text text-2xl font-bold text-ink">{recall.attempts}</p>
+          <p className="text-xs text-muted">{t('quiz.attempts')}</p>
+        </div>
       </div>
+
+      {/* 测验进行区 */}
+      {current ? (
+        <div className="mb-3 rounded-2xl bg-surface p-5 shadow-sm ring-1 ring-line">
+          <p className="reading-text mb-4 text-sm font-bold leading-relaxed text-ink">{current.question}</p>
+          <div className="flex flex-col gap-2">
+            {current.options.map((opt, i) => {
+              const isAnswer = i === current.answerIndex;
+              const showState = picked !== null;
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  disabled={showState}
+                  onClick={() => answer(i)}
+                  className={cn(
+                    'reading-text rounded-xl px-4 py-3 text-left text-sm leading-relaxed transition-colors ring-1',
+                    !showState && 'bg-paper text-ink ring-line hover:ring-accent',
+                    showState && isAnswer && 'bg-accent-soft text-ink ring-accent',
+                    showState && !isAnswer && picked === i && 'bg-red-500/10 text-muted ring-red-400/40',
+                    showState && !isAnswer && picked !== i && 'bg-paper text-muted ring-line opacity-60',
+                  )}
+                >
+                  {opt}
+                </button>
+              );
+            })}
+          </div>
+          {picked !== null && (
+            <div className="mt-4 rounded-xl bg-surface-2/60 p-4 text-sm">
+              <p className={cn('mb-1 font-bold', picked === current.answerIndex ? 'text-accent' : 'text-red-500')}>
+                {picked === current.answerIndex ? t('quiz.correct') : t('quiz.wrong')}
+              </p>
+              {currentKp && <p className="reading-text mb-2 text-xs leading-relaxed text-ink-soft">{currentKp.explanation}</p>}
+              <p className="mb-3 text-[11px] text-muted">{t('quiz.evidence')}</p>
+              <blockquote className="reading-text mb-3 border-l-2 border-accent pl-3 text-xs leading-relaxed text-ink-soft">
+                {current.evidence}
+              </blockquote>
+              {currentKp && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void openBookReader(currentKp.bookId, {
+                      anchor: {
+                        chapterId: currentKp.sourceRanges[0]?.chapterId ?? currentKp.chapterId,
+                        nodeIndex: currentKp.sourceRanges[0]?.startNode ?? 0,
+                      },
+                      returnView: 'study',
+                    })
+                  }
+                  className="flex items-center gap-1.5 rounded-full bg-surface px-3.5 py-1.5 text-xs text-ink-soft ring-1 ring-line transition-colors hover:text-accent"
+                >
+                  <BookOpen size={13} /> {t('quiz.viewSource')}
+                </button>
+              )}
+            </div>
+          )}
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                if (qIdx + 1 < round.length) {
+                  setQIdx(qIdx + 1);
+                  setPicked(null);
+                } else {
+                  startRound();
+                }
+              }}
+              disabled={picked === null}
+              className="rounded-full bg-accent px-5 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+            >
+              {qIdx + 1 < round.length ? t('quiz.next') : t('quiz.finish')}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mb-3 rounded-2xl bg-surface p-6 text-center shadow-sm ring-1 ring-line">
+          {kpGenerating ? (
+            <p className="text-sm text-muted">{t('quiz.generating')}</p>
+          ) : kps.length === 0 ? (
+            <p className="text-sm text-muted">{t('quiz.noKp')}</p>
+          ) : (
+            <button
+              type="button"
+              onClick={startRound}
+              className="rounded-full bg-accent px-6 py-2.5 text-sm font-medium text-white transition-transform hover:scale-[1.03]"
+            >
+              {t('quiz.start')}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 知识点列表：每个都能跳回原文（Knowledge Point ↔ SourceRange） */}
+      {kps.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          {kps
+            .slice()
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, 30)
+            .map((kp) => (
+              <button
+                key={kp.id}
+                type="button"
+                onClick={() =>
+                  void openBookReader(kp.bookId, {
+                    anchor: {
+                      chapterId: kp.sourceRanges[0]?.chapterId ?? kp.chapterId,
+                      nodeIndex: kp.sourceRanges[0]?.startNode ?? 0,
+                    },
+                    returnView: 'study',
+                  })
+                }
+                className="group flex items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-surface"
+              >
+                <Sparkles size={14} className="mt-1 shrink-0 text-accent" />
+                <span className="min-w-0 flex-1">
+                  <span className="reading-text block truncate text-sm font-medium text-ink">{kp.concept}</span>
+                  <span className="block truncate text-xs text-muted">
+                    {bookTitle.get(kp.bookId) ?? ''} · {kp.explanation}
+                  </span>
+                </span>
+                <ChevronRight size={14} className="shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
+              </button>
+            ))}
+        </div>
+      )}
     </div>
   );
 }

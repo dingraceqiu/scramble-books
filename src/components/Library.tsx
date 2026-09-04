@@ -148,7 +148,7 @@ export function Library() {
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           {books.map((book) => {
-            const coverage = coverageOf(book.id, units, progress);
+            const coverage = coverageOf(book, units, progress);
             const pct = Math.round(coverage * 100);
             const readIds = new Set(progress[book.id]?.readUnitIds ?? []);
             const readMinutes = units

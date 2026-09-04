@@ -1,21 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96">
-  <!--
-    Scramble Books 图标：番茄橙圆角瓷贴上，两列书卡错落下坠、上下出血，
-    像「很多本书汇成的瀑布流」不断往下刷。全轴对齐，16px 下依然清晰。
-  -->
+  <!-- Scramble Books 图标 · PWA maskable 版：全出血底，图形收缩进中心 80% 安全区 -->
   <defs>
     <linearGradient id="sb-tile" x1="10" y1="4" x2="86" y2="92" gradientUnits="userSpaceOnUse">
       <stop stop-color="#f2703d"/>
       <stop offset="1" stop-color="#dd4d1c"/>
     </linearGradient>
-    <clipPath id="sb-tile-clip">
-      <rect width="96" height="96" rx="22"/>
-    </clipPath>
   </defs>
-  <g clip-path="url(#sb-tile-clip)">
-    <rect width="96" height="96" fill="url(#sb-tile)"/>
-
-    <!-- 左列：顶部出血卡 → 淡桃卡 → 芥末黄出血卡 -->
+  <rect width="96" height="96" fill="url(#sb-tile)"/>
+  <g transform="translate(48 48) scale(0.78) translate(-48 -48)">
     <g>
       <rect x="13" y="-8" width="30" height="34" rx="6" fill="#fbf8f2"/>
       <rect x="18" y="6" width="20" height="3.2" rx="1.6" fill="#d9cdb4"/>
@@ -29,8 +21,6 @@
       <rect x="18" y="72" width="20" height="3.2" rx="1.6" fill="#fdf3df"/>
       <rect x="18" y="78.4" width="13" height="3" rx="1.5" fill="#fbe9c8"/>
     </g>
-
-    <!-- 右列：整体下沉，错落出瀑布节奏 -->
     <g>
       <rect x="53" y="8" width="30" height="28" rx="6" fill="#f3e7d3"/>
       <rect x="58" y="14" width="20" height="3.2" rx="1.6" fill="#ddcba6"/>

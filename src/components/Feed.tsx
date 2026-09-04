@@ -3,6 +3,7 @@ import { RefreshCw, Search, Upload } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/useStore';
 import { recommend } from '../lib/recommender';
+import { buildRangesByChapter, isUnitRead } from '../lib/readState';
 import { FeedCard } from './FeedCard';
 import { BrandLogo } from './icons/Logo';
 import type { FeedFilter, ReadingUnit } from '../types';
@@ -42,19 +43,25 @@ export function Feed() {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const columnCount = useColumnCount();
 
-  const readSet = useMemo(
-    () => new Set(Object.values(progress).flatMap((p) => p.readUnitIds)),
-    [progress],
-  );
+  // 已读集合从 readRanges（事实层）推导：单元的 Source Range 被完全覆盖才算已读，
+  // Feed 与 Reader 因此共享同一套原文坐标系，不存在两套阅读状态。
+  const readSet = useMemo(() => {
+    const byChapter = buildRangesByChapter(
+      Object.values(progress).flatMap((p) => p.readRanges ?? []),
+    );
+    return new Set(units.filter((u) => isUnitRead(u, byChapter)).map((u) => u.id));
+  }, [units, progress]);
 
   const bookMap = useMemo(() => new Map(books.map((b) => [b.id, b])), [books]);
 
   const ordered = useMemo(() => {
     const kw = search.trim().toLowerCase();
-    let candidates = units;
-    if (filter === 'unread') candidates = units.filter((u) => !readSet.has(u.id));
-    if (filter === 'read') candidates = units.filter((u) => readSet.has(u.id));
-    if (filter === 'favorites') candidates = units.filter((u) => marks.favorites[u.id]);
+    const now = Date.now();
+    // 「今天不想读」的笔记到解除时间前不进 Feed
+    let candidates = units.filter((u) => (marks.snoozedUntil?.[u.id] ?? 0) <= now);
+    if (filter === 'unread') candidates = candidates.filter((u) => !readSet.has(u.id));
+    if (filter === 'read') candidates = candidates.filter((u) => readSet.has(u.id));
+    if (filter === 'favorites') candidates = candidates.filter((u) => marks.favorites[u.id]);
     if (kw) {
       candidates = candidates.filter((u) => {
         const book = bookMap.get(u.bookId);

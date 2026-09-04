@@ -183,7 +183,12 @@ export function recommend(allUnits: ReadingUnit[], opts: RecommendOptions): Read
   const now = opts.now ?? Date.now();
   const bookTypeOf =
     opts.bookTypeOf ?? ((u: ReadingUnit): BookType | undefined => (u as ReadingUnit & { _bt?: BookType })._bt);
-  const base = (opts.candidates ?? allUnits).filter((u) => !exclude.has(u.id));
+  const base = (opts.candidates ?? allUnits).filter(
+    (u) =>
+      !exclude.has(u.id) &&
+      // 「今天不想读」的笔记在解除前不参与推荐
+      (opts.marks.snoozedUntil?.[u.id] ?? 0) <= now,
+  );
 
   // —— 行为信号预计算（按书聚合一次）——
   const bookTypeById = new Map<string, BookType | undefined>();

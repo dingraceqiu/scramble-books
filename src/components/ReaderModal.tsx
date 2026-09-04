@@ -3,6 +3,7 @@ import {
   ArrowRight,
   BookOpen,
   Check,
+  Clock,
   EyeOff,
   Heart,
   Highlighter,
@@ -20,7 +21,8 @@ export function ReaderModal() {
   const { t, i18n } = useTranslation();
   const {
     readerId, units, books, progress, highlights, notes, marks,
-    closeReader, nextUnit, nextUnitInBook, toggleFavorite, feedback, openBookReader,
+    closeReader, nextUnit, nextUnitInBook, markRead, snoozeUnit, setPartialRead,
+    toggleFavorite, feedback, openBookReader,
     addHighlight, removeHighlight, addNote, removeNote,
   } = useStore();
 
@@ -40,6 +42,9 @@ export function ReaderModal() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [noteDraft, setNoteDraft] = useState('');
   const [sel, setSel] = useState<{ text: string; x: number; y: number; nodeIndex?: number } | null>(null);
+  /** 恢复进度提示（打开时若有上次进度则显示，滚动后消失） */
+  const [resumePct, setResumePct] = useState<number | null>(null);
+  const partialTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const unitHighlights = useMemo(
     () => highlights.filter((h) => h.unitId === readerId).sort((a, b) => b.createdAt - a.createdAt),
@@ -50,12 +55,41 @@ export function ReaderModal() {
     [notes, readerId],
   );
 
-  // 切换单元时：滚回顶部、清空选区与草稿
+  // 切换单元时：恢复上次阅读位置（若有）、清空选区与草稿
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: 0 });
+    const el = scrollRef.current;
+    const pct = readerId ? useStore.getState().marks.partial?.[readerId] : undefined;
+    setResumePct(pct != null && pct >= 5 && pct < 95 ? pct : null);
+    requestAnimationFrame(() => {
+      if (el) {
+        const max = el.scrollHeight - el.clientHeight;
+        el.scrollTo({ top: pct != null && max > 0 ? (max * pct) / 100 : 0 });
+      }
+    });
     setSel(null);
     setNoteDraft('');
   }, [readerId]);
+
+  /**
+   * 弹层内滚动上报：滚到 95% 记为已读（写入 readRanges 事实层）并清除进度；
+   * 中途退出则防抖保存百分比，下次打开恢复到同一位置。
+   */
+  const handleModalScroll = () => {
+    const el = scrollRef.current;
+    if (!el || !unit) return;
+    setResumePct(null);
+    const max = el.scrollHeight - el.clientHeight;
+    const pct = max <= 0 ? 100 : Math.round((el.scrollTop / max) * 100);
+    if (pct >= 95) {
+      const alreadyRead = useStore.getState().progress[book?.id ?? '']?.readUnitIds.includes(unit.id);
+      if (!alreadyRead) markRead(unit.id, 'feed');
+      if (useStore.getState().marks.partial?.[unit.id] != null) setPartialRead(unit.id, null);
+      return;
+    }
+    if (pct < 5) return;
+    if (partialTimer.current) clearTimeout(partialTimer.current);
+    partialTimer.current = setTimeout(() => setPartialRead(unit.id, pct), 800);
+  };
 
   // 弹层打开时锁定背景滚动
   useEffect(() => {
@@ -100,9 +134,22 @@ export function ReaderModal() {
       setSel(null);
       return;
     }
-    // 定位选区所在段落 → 映射回 SourceNode 下标（第 i 段 = sourceStart.startNode + i）。
-    // 补齐 Source Range 后，弹层里划的线/写的笔记才能在 Reader 原文位置回显、
-    // 且学习页可精确跳回原文。
+    // 定位选区所在段落 → 映射回 SourceNode 下标。补齐 Source Range 后，
+    // 弹层里划的线/写的笔记才能在 Reader 原文位置回显、且学习页可精确跳回原文。
+    // 注意：非小说单元若不以章标题开头，切分器会把章标题拼到 sourceText 最前
+    // （segmenter.ts），此时段落 0 不在节点区间内，后续段落下标整体前移一位；
+    // 解析器保证节点文本不含空行，段落数与区间节点数的差值可精确判定该情形。
+    const rangeSize = unit.sourceEnd.endNode - unit.sourceStart.startNode + 1;
+    const partCount = unit.sourceText.split('\n\n').filter(Boolean).length;
+    const prependedHeading = partCount === rangeSize + 1;
+    const nodeIndexFor = (pIdx: number): number | undefined => {
+      if (pIdx < 0) return undefined;
+      if (prependedHeading) {
+        // 拼接的章标题段：真实标题节点不在本单元区间内，不猜下标（跳转仍落到单元起点）
+        return pIdx === 0 ? undefined : (unit.sourceStart.startNode ?? 0) + pIdx - 1;
+      }
+      return (unit.sourceStart.startNode ?? 0) + pIdx;
+    };
     const ancestor =
       range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
         ? (range.commonAncestorContainer as Element)
@@ -116,7 +163,7 @@ export function ReaderModal() {
       text: text.slice(0, 200),
       x: rect.left + rect.width / 2 - (panelRect?.left ?? 0),
       y: rect.top - (panelRect?.top ?? 0) + (scrollRef.current?.scrollTop ?? 0),
-      nodeIndex: pIdx >= 0 ? (unit.sourceStart.startNode ?? 0) + pIdx : undefined,
+      nodeIndex: nodeIndexFor(pIdx),
     });
   };
 
@@ -191,7 +238,7 @@ export function ReaderModal() {
           </header>
 
           {/* 正文滚动区 */}
-          <div ref={scrollRef} className="relative flex-1 overflow-y-auto px-5 py-6 sm:px-10 sm:py-8">
+          <div ref={scrollRef} onScroll={handleModalScroll} className="relative flex-1 overflow-y-auto px-5 py-6 sm:px-10 sm:py-8">
             {/* AI 标题区（大字报式，与原文严格分区） */}
             <div className="mb-7">
               <span className="mb-3 inline-flex items-center gap-1 rounded-full bg-ink px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-paper">
@@ -209,6 +256,13 @@ export function ReaderModal() {
               <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted">{t('common.authorOriginal')}</span>
               <span className="h-px flex-1 bg-line" />
             </div>
+
+            {/* 上次阅读位置提示：滚动后自动消失 */}
+            {resumePct != null && (
+              <div className="mb-4 inline-block rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
+                {t('feed.partialHint', { pct: resumePct })}
+              </div>
+            )}
 
             {/* 原文 */}
             <div
@@ -356,6 +410,19 @@ export function ReaderModal() {
             >
               <EyeOff size={18} />
               {fb === -1 && <span>{t('card.reduced')}</span>}
+            </button>
+            <button
+              type="button"
+              aria-label={t('card.snooze')}
+              title={t('card.snoozeHint')}
+              onClick={() => {
+                snoozeUnit(unit.id);
+                closeReader();
+              }}
+              className="flex items-center gap-1 rounded-full px-2.5 py-2 text-xs font-medium text-muted transition-colors hover:bg-surface-2"
+            >
+              <Clock size={18} />
+              <span className="hidden md:inline">{t('card.snooze')}</span>
             </button>
             {nextInBook && (
               <button

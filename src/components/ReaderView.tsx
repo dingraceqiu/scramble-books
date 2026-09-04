@@ -17,6 +17,7 @@ import { useStore } from '../store/useStore';
 import { useReaderPrefs, FONT_SIZE_PX, LINE_HEIGHT } from '../store/useReaderPrefs';
 import type { Chapter, HighlightColor, SourceNode } from '../types';
 import { unitAtNode } from '../lib/segmenter';
+import { readNodeSetFromRanges } from '../lib/readState';
 import { formatReadingMinutes, estimateReadingMinutes, cn } from '../lib/utils';
 import { SettingsPanel } from './reader/SettingsPanel';
 import { BookmarkPanel } from './reader/MarksPanels';
@@ -54,7 +55,7 @@ export function ReaderView() {
   const highlights = useStore((s) => s.highlights);
   const notes = useStore((s) => s.notes);
   const closeBookReader = useStore((s) => s.closeBookReader);
-  const markRead = useStore((s) => s.markRead);
+  const markNodesRead = useStore((s) => s.markNodesRead);
   const addHighlight = useStore((s) => s.addHighlight);
   const addNote = useStore((s) => s.addNote);
 
@@ -87,34 +88,25 @@ export function ReaderView() {
     [doc],
   );
 
-  // 章 → 已读节点集合
-  const readNodeSet = useMemo(() => {
-    const map = new Map<string, Set<number>>();
-    const addRange = (chapterId: string, start: number, end: number) => {
-      const set = map.get(chapterId) ?? new Set<number>();
-      for (let n = start; n <= end; n++) set.add(n);
-      map.set(chapterId, set);
-    };
-    const readIds = new Set(bookProgress?.readUnitIds ?? []);
-    for (const u of bookUnits) {
-      if (!readIds.has(u.id)) continue;
-      const st = u.sourceStart;
-      const en = u.sourceEnd;
-      if (!st || !en) continue;
-      addRange(st.chapterId, st.startNode, st.endNode);
-      if (en.chapterId !== st.chapterId) {
-        addRange(en.chapterId, en.startNode, en.endNode);
-      }
-    }
-    return map;
-  }, [bookUnits, bookProgress]);
+  // 章 → 已读节点集合：直接来自 readRanges（事实层）。
+  // Feed 里读过的单元区间、Reader 里滚动过的段落，在这里是同一套坐标。
+  const readNodeSet = useMemo(
+    () => readNodeSetFromRanges(bookProgress?.readRanges ?? []),
+    [bookProgress],
+  );
 
-  // 章节进度
+  // 章节进度（只统计正文节点：标题节点会随滚动被标记已读，但不计入分母）
   const chapterStats = useMemo(() => {
     const stats = new Map<string, { read: number; total: number }>();
     for (const ch of chapters) {
-      const total = ch.nodes.filter((n) => n.type !== 'heading').length;
-      const read = readNodeSet.get(ch.id)?.size ?? 0;
+      const set = readNodeSet.get(ch.id);
+      let read = 0;
+      let total = 0;
+      for (const n of ch.nodes) {
+        if (n.type === 'heading') continue;
+        total++;
+        if (set?.has(n.index)) read++;
+      }
       stats.set(ch.id, { read, total });
     }
     return stats;
@@ -224,27 +216,28 @@ export function ReaderView() {
     }, 400);
   }, [bookId, savePosition]);
 
-  // IntersectionObserver：已读上报
+  // IntersectionObserver：已读上报（事实层 = readRanges，批量合并成连续区间）
   useEffect(() => {
-    if (!bookId || bookUnits.length === 0) return;
+    if (!bookId || chapters.length === 0) return;
     const observer = new IntersectionObserver(
       (entries) => {
+        const seen: Array<{ chapterId: string; nodeIndex: number }> = [];
         for (const entry of entries) {
           if (!entry.isIntersecting) continue;
           const el = entry.target as HTMLElement;
           const chapterId = el.dataset.chapter;
           const nodeIndex = Number(el.dataset.node);
           if (!chapterId || Number.isNaN(nodeIndex)) continue;
-          const u = unitAtNode(bookUnits, chapterId, nodeIndex);
-          if (u) markRead(u.id);
+          seen.push({ chapterId, nodeIndex });
         }
+        if (seen.length > 0) markNodesRead(bookId, seen, 'reader');
       },
       { root: scrollRef.current, rootMargin: '0px 0px -35% 0px', threshold: 0.1 },
     );
     const nodes = document.querySelectorAll('[data-chapter][data-node]');
     nodes.forEach((n) => observer.observe(n));
     return () => observer.disconnect();
-  }, [bookId, bookUnits, markRead, chapters.length]);
+  }, [bookId, markNodesRead, chapters.length]);
 
   // 划词
   const handleSelection = useCallback(() => {

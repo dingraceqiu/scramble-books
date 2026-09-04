@@ -60,7 +60,8 @@
     },
     "nextNote": "Next note",
     "nextInBook": "Continue this book",
-    "nextRandom": "Random next"
+    "nextRandom": "Random next",
+    "partialHint": "Resumed at {{pct}}%"
   },
   "card": {
     "note": "NOTE {{index}}",
@@ -73,6 +74,8 @@
     "reduced": "Reduced",
     "moreHint": "Loved it — show more like this",
     "moreLiked": "Boosted",
+    "snooze": "Not today",
+    "snoozeHint": "Stay unread — resurface tomorrow",
     "cancelReduce": "Undo",
     "undoReduce": "Undo reduce",
     "continueEpisode": "Continue the story",
@@ -257,5 +260,21 @@
     "errPasswordMismatch": "Passwords do not match",
     "errInviteRequired": "Invite code is required",
     "errGeneric": "Something went wrong, please try again"
+  },
+  "quiz": {
+    "sectionTitle": "Knowledge & Quiz",
+    "kpCount": "Knowledge points",
+    "recallRate": "Recall accuracy",
+    "attempts": "Attempts",
+    "noKp": "After reading a few pieces, knowledge points will be distilled here from what you've actually read.",
+    "generating": "Distilling knowledge points from your reading…",
+    "start": "Start quiz (Level 1 · Recall)",
+    "next": "Next",
+    "finish": "Round done — go again",
+    "correct": "Correct",
+    "wrong": "Not quite",
+    "evidence": "Source evidence",
+    "viewSource": "View original text",
+    "recallQuestion": "Regarding \"{{concept}}\", which sentence is the author's original wording?"
   }
 }

@@ -44,6 +44,8 @@ export async function buildSnapshot(): Promise<CloudSnapshot> {
     highlights: data.highlights,
     notes: data.notes,
     marks: data.marks,
+    knowledgePoints: data.knowledgePoints,
+    quizAttempts: data.quizAttempts,
     readerPrefs: readReaderPrefs(),
   };
 }
@@ -123,6 +125,8 @@ export async function pullCloudData(): Promise<'replaced' | 'uploaded' | 'empty'
           highlights: Array.isArray(data.highlights) ? data.highlights : [],
           notes: Array.isArray(data.notes) ? data.notes : [],
           marks: data.marks ?? db.DEFAULT_MARKS,
+          knowledgePoints: Array.isArray(data.knowledgePoints) ? data.knowledgePoints : [],
+          quizAttempts: Array.isArray(data.quizAttempts) ? data.quizAttempts : [],
         });
         writeReaderPrefs(data.readerPrefs);
       } finally {

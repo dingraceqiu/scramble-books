@@ -192,4 +192,78 @@ router.post('/api/ai-titles', async (req, res) => {
   }
 });
 
+/**
+ * 知识点抽取（GLM）。
+ * body: { items: [{ id, text }] } — text 是【已读】原文（只考已读内容的硬规则由前端保证）。
+ * 铁律：quote 必须是原文逐字摘录；concept/explanation 不得引入原文没有的 claim。
+ * 返回 { results: [{ id, concept, explanation, quote }], generator }；失败时 ok:false（前端走本地兜底）。
+ */
+router.post('/api/knowledge-points', async (req, res) => {
+  if (!glmAvailable()) {
+    res.json({ ok: false, error: 'GLM_API_KEY 未配置', results: [] });
+    return;
+  }
+  const body = (req.body ?? {}) as { items?: unknown };
+  const items = Array.isArray(body.items) ? body.items : [];
+  const cleaned = items
+    .slice(0, 6)
+    .map((it, idx) => {
+      const o = (it ?? {}) as Record<string, unknown>;
+      const text = typeof o.text === 'string' ? o.text.slice(0, 2500) : '';
+      return text.trim() ? { id: String(o.id ?? idx), text } : null;
+    })
+    .filter((x): x is { id: string; text: string } => x !== null);
+
+  if (cleaned.length === 0) {
+    res.json({ ok: false, error: '没有有效文本', results: [] });
+    return;
+  }
+
+  const listing = cleaned
+    .map((it, i) => `[${i}] id=${it.id}\n原文：${it.text}`)
+    .join('\n\n');
+
+  try {
+    const raw = await glmChat(
+      [
+        {
+          role: 'system',
+          content:
+            '你是「刷书」App 的学习编辑，从用户已读的书籍原文中抽取「知识点」。铁律：\n' +
+            '1. 每段原文抽取 1 个最值得记住的知识点（一个概念、机制、论证或结论）；\n' +
+            '2. concept：不超过 20 字的概念短语，用原文的主要语言；\n' +
+            '3. explanation：1~2 句解释，忠实于原文，绝不引入原文没有的观点或事实；\n' +
+            '4. quote：支撑该知识点的原文核心句，必须逐字摘自原文，不得改写；\n' +
+            '只输出 JSON 数组：[{"id":"...","concept":"...","explanation":"...","quote":"..."}]',
+        },
+        { role: 'user', content: `请为以下 ${cleaned.length} 段原文各抽取一个知识点：\n\n${listing}` },
+      ],
+      { temperature: 0.3, timeoutMs: 60000, maxTokens: 1200 },
+    );
+    const parsed = extractJson<Array<{ id?: string; concept?: string; explanation?: string; quote?: string }>>(raw);
+    if (!Array.isArray(parsed)) {
+      res.json({ ok: false, error: 'GLM 返回无法解析', results: [] });
+      return;
+    }
+    const results = parsed
+      .filter(
+        (r): r is { id: string; concept: string; explanation: string; quote?: string } =>
+          typeof r?.id === 'string' &&
+          typeof r?.concept === 'string' &&
+          !!r.concept.trim() &&
+          typeof r?.explanation === 'string' &&
+          !!r.explanation.trim(),
+      )
+      .map((r) => ({
+        id: r.id,
+        concept: r.concept.trim().slice(0, 40),
+        explanation: r.explanation.trim().slice(0, 300),
+        quote: typeof r.quote === 'string' && r.quote.trim() ? r.quote.trim().slice(0, 200) : undefined,
+      }));
+    res.json({ ok: results.length > 0, results, generator: glmModelName() });
+  } catch (e) {
+    res.json({ ok: false, error: (e as Error).message?.slice(0, 120), results: [] });
+  }
+});
+
 export default router;

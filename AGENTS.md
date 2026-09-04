@@ -57,11 +57,13 @@
 
 ## 关键设计约定
 
-- **原文不可变**：ReadingUnit.sourceText 直接由 SourceNode 拼接；AI 内容仅 `aiTitle/aiTags/estimatedReadingTime`，两者分离。
+- **架构铁律（分层）**：**Source 是事实层（Book → Chapter → SourceNode / SourceRange）；ReadingUnit 是呈现层；Knowledge Point 是学习层。所有上层对象（Feed 单元、Highlight、Note、Reading State、Knowledge Point、Quiz、Mastery）都必须能一路追溯回 Source。** 任何新功能先检查这条链有没有断。
+- **原文不可变**：ReadingUnit.sourceText 直接由 SourceNode 拼接；AI 内容仅标题与学习层抽取（concept/explanation，quote 必须逐字回溯原文），两者分离。
 - **切分/标题模块独立**：segmenter、titleGen 均为纯函数模块，未来可替换为 AI 语义切分/真实 LLM。
-- **阅读状态**：进度按 ReadingUnit 记录（ReadingProgress.readUnitIds），Reader 连续阅读滚动时经 IntersectionObserver 上报 markRead，Feed 与 Reader 共享；已读段落用淡底色区分。
+- **阅读状态（readRanges 事实层）**：`ReadingProgress.readRanges`（chapterId + 节点闭区间 + via: 'feed'|'reader' + at）是「我读过哪些原文」的唯一事实来源；`readUnitIds` 只是由它推导的呈现层缓存，禁止单独写入。Feed（单元已读 = 区间被完全覆盖，`readState.isUnitRead`）、Reader（IntersectionObserver 上报 `markNodesRead`，按章合并区间）、覆盖率（`coverageOf`）、Quiz 出题范围全部从 readRanges 推导；相关纯函数集中在 `src/lib/readState.ts`。旧数据（只有 readUnitIds）在 hydrate 时由 `migrateProgress` 自动迁移。
+- **学习层（Knowledge Point / Quiz / Mastery）**：KP 只允许从已读 Source Range 抽取（Quiz 只考已读内容的硬规则，`src/lib/knowledge.ts`）；KP.sourceRanges 记录来源、quote 必须逐字存在于原文（否则该 KP 不出题）；题目是 KP 的测试方式（QuizQuestion），Mastery 一律由 QuizAttempt 推导（`masteryByLevel`），**绝不存单一总分**。Level 0=Exposure 由 Reading State 表达，1=Recall 已实现，2/3/4 数据模型已预留。云端快照 CloudSnapshot 可选携带 knowledgePoints/quizAttempts。
 - **Reader 连续阅读**：`view:'reader'` + `readerBookId/readerAnchor/readerDoc`，章节原文懒加载自 documents store（`db.getDocument`）；`unitAtNode/lastReadUnit/findHighlightNode` 在 segmenter.ts 末尾，负责段落→单元归属、继续阅读定位、划线包裹。
-- **划线/笔记**：HighLight/Note 按 unitId+bookId 关联，Feed 弹层与 Reader 页共享同一套数据；Note 可选 text 字段存划选原文。
+- **划线/笔记**：HighLight/Note 按 unitId+bookId 关联并记录 chapterId+nodeIndex（Feed 弹层划选时由段落序号映射回 SourceNode 下标），Feed 弹层与 Reader 页共享同一套数据；Note 可选 text 字段存划选原文。
 - **本地存储**：无后端 API；上传文件仅在浏览器内解析，不落服务器。
 
 ## 云端模式约定（可选，不影响本地模式）
