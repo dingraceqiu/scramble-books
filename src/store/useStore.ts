@@ -151,9 +151,10 @@ export const useStore = create<StoreState>((set, get) => ({
 
   ingestParsedBook: async (parsed, bookType, onlineResult) => {
     const bookId = uid('book');
-    // 类型策略：EPUB 元数据 / 联网综合判断优先；都查不到默认「其他」（不本地瞎猜），
+    // 类型策略：EPUB 元数据 / 联网综合判断优先；都查不到默认「社科成长」，
+    // 保证导入的书总是进 Feed（用户需求：Feed 只来自自己的书）。
     // 用户可在书库类型标签下拉里手动改（改完触发重新切分）。
-    const type: BookType = bookType ?? onlineResult?.bookType ?? 'other';
+    const type: BookType = bookType ?? onlineResult?.bookType ?? 'social_science';
     const source: Book['bookTypeSource'] = bookType
       ? 'manual'
       : onlineResult?.source === 'epub'
