@@ -12,6 +12,7 @@ export function Study() {
   const highlights = useStore((s) => s.highlights);
   const notes = useStore((s) => s.notes);
   const openReader = useStore((s) => s.openReader);
+  const openBookReader = useStore((s) => s.openBookReader);
 
   const readSet = new Set(Object.values(progressMap).flatMap((p) => p.readUnitIds));
 
@@ -164,6 +165,91 @@ export function Study() {
                 />
               </button>
             ))}
+          </div>
+        </>
+      )}
+
+      {/* 划线回顾：点击跳回原文位置 */}
+      {highlights.length > 0 && (
+        <>
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.2em] text-muted">
+            {t('study.highlightsTitle')}
+          </p>
+          <div className="mb-10 flex flex-col gap-1.5">
+            {[...highlights]
+              .sort((a, b) => b.createdAt - a.createdAt)
+              .map((h) => (
+                <button
+                  key={h.id}
+                  type="button"
+                  onClick={() =>
+                    openBookReader(h.bookId, {
+                      anchor:
+                        h.chapterId && typeof h.nodeIndex === 'number'
+                          ? { chapterId: h.chapterId, nodeIndex: h.nodeIndex }
+                          : null,
+                      returnView: 'study',
+                    })
+                  }
+                  className="group flex items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-surface"
+                >
+                  <span aria-hidden className="mt-0.5 shrink-0 font-serif text-lg leading-none text-accent">
+                    &ldquo;
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="reading-text block text-sm leading-relaxed text-ink [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">
+                      {h.text}
+                    </span>
+                    <span className="block truncate text-xs text-muted">
+                      {bookById.get(h.bookId)?.title ?? ''}
+                    </span>
+                  </span>
+                </button>
+              ))}
+          </div>
+        </>
+      )}
+
+      {/* 我的笔记：点击跳回原文位置 */}
+      {notes.length > 0 && (
+        <>
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.2em] text-muted">
+            {t('study.notesTitle')}
+          </p>
+          <div className="mb-10 flex flex-col gap-1.5">
+            {[...notes]
+              .sort((a, b) => b.createdAt - a.createdAt)
+              .map((n) => (
+                <button
+                  key={n.id}
+                  type="button"
+                  onClick={() =>
+                    openBookReader(n.bookId, {
+                      anchor:
+                        n.chapterId && typeof n.nodeIndex === 'number'
+                          ? { chapterId: n.chapterId, nodeIndex: n.nodeIndex }
+                          : null,
+                      returnView: 'study',
+                    })
+                  }
+                  className="group flex items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-surface"
+                >
+                  <StickyNote size={15} className="mt-1 shrink-0 text-[#d9a441]" />
+                  <span className="min-w-0 flex-1">
+                    <span className="reading-text block text-sm leading-relaxed text-ink [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:3] overflow-hidden">
+                      {n.content}
+                    </span>
+                    {n.text && (
+                      <span className="mt-0.5 block truncate text-xs italic text-muted">
+                        {t('study.noteOnQuote', { quote: n.text })}
+                      </span>
+                    )}
+                    <span className="block truncate text-xs text-muted">
+                      {bookById.get(n.bookId)?.title ?? ''}
+                    </span>
+                  </span>
+                </button>
+              ))}
           </div>
         </>
       )}

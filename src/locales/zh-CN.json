@@ -139,6 +139,9 @@
     "inProgressTitle": "在读的书",
     "unitProgress": "{{read}}/{{total}} 篇",
     "readNotesTitle": "读过的笔记",
+    "highlightsTitle": "划线回顾",
+    "notesTitle": "我的笔记",
+    "noteOnQuote": "关于「{{quote}}」",
     "quizComing": "Quiz 自测即将上线",
     "quizBody": "读完书之后，这里会根据你的划线、笔记和阅读单元生成测验题，帮你把「刷过」变成「记住」。",
     "quizBadge": "MVP 3 · 敬请期待"

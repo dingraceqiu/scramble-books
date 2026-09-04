@@ -93,7 +93,7 @@ interface StoreState {
 
   openBookReader: (
     bookId: string,
-    opts?: { anchor?: ReaderAnchor | null; returnView?: 'feed' | 'library' },
+    opts?: { anchor?: ReaderAnchor | null; returnView?: 'feed' | 'library' | 'study' },
   ) => Promise<void>;
   closeBookReader: () => void;
 

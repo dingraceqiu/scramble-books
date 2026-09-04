@@ -139,6 +139,9 @@
     "inProgressTitle": "Currently reading",
     "unitProgress": "{{read}}/{{total}} notes",
     "readNotesTitle": "Notes you've read",
+    "highlightsTitle": "Highlights",
+    "notesTitle": "My notes",
+    "noteOnQuote": "On \"{{quote}}\"",
     "quizComing": "Quizzes are coming soon",
     "quizBody": "After you finish a book, quizzes generated from your highlights, notes and reading units will appear here — turning \"scrolled past\" into \"remembered\".",
     "quizBadge": "MVP 3 · Stay tuned"
