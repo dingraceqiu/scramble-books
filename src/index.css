@@ -1,0 +1,193 @@
+@import url('https://fonts.googleapis.cn/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;600;700;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* LOEWE craft · 奶油工坊（白昼） */
+  --paper: 244 239 231;     /* 奶油底 */
+  --surface: 251 248 242;   /* 卡片纸白 */
+  --surface-2: 239 233 221; /* 浅压印 */
+  --ink: 28 26 23;          /* 近黑墨 */
+  --ink-soft: 62 57 50;
+  --muted: 138 131 120;
+  --line: 230 223 210;
+  --accent: 232 93 44;      /* LOEWE 番茄橙 */
+  --accent-soft: 248 224 211;
+  /* 封面轮换色（奶白 / 杏仁 / 淡桃） */
+  --cover-0: 251 248 242;
+  --cover-1: 243 231 211;
+  --cover-2: 246 221 208;
+}
+
+.dark {
+  /* 暗房陈列（夜间） */
+  --paper: 19 17 15;
+  --surface: 30 27 23;
+  --surface-2: 42 38 32;
+  --ink: 242 237 228;
+  --ink-soft: 206 198 186;
+  --muted: 148 139 126;
+  --line: 46 41 35;
+  --accent: 240 106 51;
+  --accent-soft: 66 40 28;
+  /* 封面轮换色（深奶 / 深杏 / 深桃） */
+  --cover-0: 38 34 28;
+  --cover-1: 46 38 28;
+  --cover-2: 51 38 31;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background-color: rgb(var(--paper));
+  color: rgb(var(--ink));
+  font-family: 'Noto Sans SC', ui-sans-serif, system-ui, sans-serif;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+::selection {
+  background: rgb(var(--accent) / 0.25);
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--muted) / 0.35);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.reading-text {
+  font-family: 'Noto Serif SC', Georgia, serif;
+}
+
+/* ───────── Reader 阅读主题（作用于 .reader-surface 容器）───────── */
+/* 米纸：沿用全局浅色 */
+.reader-surface[data-reader-theme='paper'] {
+  --reader-bg: 251 248 242;
+  --reader-ink: 28 26 23;
+  --reader-ink-soft: 82 75 66;
+  --reader-muted: 138 131 120;
+  --reader-line: 230 223 210;
+  --reader-read: 240 233 220;
+}
+/* 暖碳：深色阅读 */
+.reader-surface[data-reader-theme='carbon'] {
+  --reader-bg: 24 22 19;
+  --reader-ink: 238 233 224;
+  --reader-ink-soft: 200 192 180;
+  --reader-muted: 150 141 128;
+  --reader-line: 48 43 36;
+  --reader-read: 40 36 30;
+}
+/* 护眼绿：柔和豆沙绿 */
+.reader-surface[data-reader-theme='eye'] {
+  --reader-bg: 226 234 217;
+  --reader-ink: 40 48 38;
+  --reader-ink-soft: 74 84 70;
+  --reader-muted: 120 130 112;
+  --reader-line: 203 214 192;
+  --reader-read: 210 221 198;
+}
+.reader-surface {
+  background-color: rgb(var(--reader-bg));
+  color: rgb(var(--reader-ink));
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+.reader-surface .r-text { color: rgb(var(--reader-ink)); }
+.reader-surface .r-soft { color: rgb(var(--reader-ink-soft)); }
+.reader-surface .r-muted { color: rgb(var(--reader-muted)); }
+.reader-surface .r-line { border-color: rgb(var(--reader-line)); }
+.reader-surface .r-chip {
+  background-color: rgb(var(--reader-ink) / 0.06);
+  color: rgb(var(--reader-ink-soft));
+}
+.reader-surface .r-read {
+  background-color: rgb(var(--reader-read) / 0.6);
+}
+.reader-surface .r-bar-track { background-color: rgb(var(--reader-ink) / 0.12); }
+
+/* 正文阅读：字体/字号/行距由 JS 以 CSS 变量驱动 */
+.reader-article {
+  font-size: var(--rfs, 18px);
+  line-height: var(--rlh, 1.95);
+  font-family: var(--rff, 'Noto Serif SC', Georgia, serif);
+}
+.reader-article.reading-text,
+.reader-article .reading-text {
+  font-family: var(--rff, 'Noto Serif SC', Georgia, serif);
+}
+
+/* 长书性能：视口外章节跳过渲染布局 */
+.reader-article section {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 600px;
+}
+
+/* 搜索命中高亮 */
+@keyframes searchFlash {
+  0%, 100% { background-color: rgb(var(--accent) / 0.28); }
+  50% { background-color: rgb(var(--accent) / 0.55); }
+}
+.r-search-hit {
+  animation: searchFlash 1.6s ease-in-out 3;
+  background-color: rgb(var(--accent) / 0.28);
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgb(var(--accent) / 0.4);
+}
+
+/* 多色划线 */
+.hl-yellow { background: rgba(217, 164, 65, 0.4); }
+.hl-green { background: rgba(120, 170, 110, 0.42); }
+.hl-blue { background: rgba(110, 150, 200, 0.4); }
+.hl-pink { background: rgba(220, 140, 165, 0.4); }
+.dark .hl-yellow, .reader-surface[data-reader-theme='carbon'] .hl-yellow { background: rgba(217, 164, 65, 0.32); }
+.dark .hl-green, .reader-surface[data-reader-theme='carbon'] .hl-green { background: rgba(120, 170, 110, 0.32); }
+.dark .hl-blue, .reader-surface[data-reader-theme='carbon'] .hl-blue { background: rgba(110, 150, 200, 0.32); }
+.dark .hl-pink, .reader-surface[data-reader-theme='carbon'] .hl-pink { background: rgba(220, 140, 165, 0.32); }
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.line-clamp-4 {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up {
+  animation: fadeUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(24px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-modal-in {
+  animation: modalIn 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes backdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-backdrop-in {
+  animation: backdropIn 0.25s ease both;
+}
