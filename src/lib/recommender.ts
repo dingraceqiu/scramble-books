@@ -135,22 +135,23 @@ function computeTypeAffinity(
 /**
  * 贪心重排：按分数取候选，若与上一条同书且仍有其他书可选，则顺延，
  * 保证瀑布流中书籍混杂、有多样性。
+ * 替补仅在分数差距可接受（< 7 分）时启用：强行为信号会让单本书的分数聚集，
+ * 允许这类差距内插换书保持多样性；但绝不跨过已读 -30 的降权深谷。
  */
-function diversify(ranked: ReadingUnit[]): ReadingUnit[] {
+function diversify(scored: Array<{ u: ReadingUnit; s: number }>): ReadingUnit[] {
   const result: ReadingUnit[] = [];
-  const remaining = [...ranked];
+  const remaining = [...scored];
   let lastBookId = '';
 
   while (remaining.length > 0) {
     let pickIdx = 0;
-    if (remaining[0].bookId === lastBookId) {
-      const alt = remaining.findIndex((u) => u.bookId !== lastBookId);
-      // 替补分数差距不大（<3）时优先换书，否则尊重分数
-      if (alt > 0 && alt < 12) pickIdx = alt;
+    if (remaining[0].u.bookId === lastBookId) {
+      const alt = remaining.findIndex((x) => x.u.bookId !== lastBookId);
+      if (alt > 0 && alt < 12 && remaining[0].s - remaining[alt].s < 7) pickIdx = alt;
     }
     const [picked] = remaining.splice(pickIdx, 1);
-    result.push(picked);
-    lastBookId = picked.bookId;
+    result.push(picked.u);
+    lastBookId = picked.u.bookId;
   }
   return result;
 }
@@ -192,7 +193,7 @@ export function recommend(allUnits: ReadingUnit[], opts: RecommendOptions): Read
     if (!bookTypeById.has(u.bookId)) bookTypeById.set(u.bookId, bookTypeOf(u));
   }
   const favoriteCountByBook = new Map<string, number>();
-  for (const [unitId, on] of Object.entries(marks.favorites)) {
+  for (const [unitId, on] of Object.entries(opts.marks.favorites)) {
     if (!on) continue;
     const bookId = unitById.get(unitId)?.bookId;
     if (bookId) favoriteCountByBook.set(bookId, (favoriteCountByBook.get(bookId) ?? 0) + 1);
@@ -242,8 +243,7 @@ export function recommend(allUnits: ReadingUnit[], opts: RecommendOptions): Read
   const scoredNonFiction = diversify(
     nonFiction
       .map((u) => ({ u, s: scoreUnit(u, read, opts.marks, opts.seed ?? 0, ctxFor(u)) }))
-      .sort((a, b) => b.s - a.s)
-      .map((x) => x.u),
+      .sort((a, b) => b.s - a.s),
   );
 
   // ── 混合：追更的「下一篇」插到最前（多本追更可占前几条），其余交错 ──
