@@ -5,7 +5,7 @@ import { useStore } from '../store/useStore';
 import { recommend } from '../lib/recommender';
 import { FeedCard } from './FeedCard';
 import { BrandLogo } from './icons/Logo';
-import type { FeedFilter } from '../types';
+import type { FeedFilter, ReadingUnit } from '../types';
 
 const FILTERS: { key: FeedFilter }[] = [
   { key: 'all' },
@@ -15,6 +15,19 @@ const FILTERS: { key: FeedFilter }[] = [
 
 /** 首批渲染卡片数 / 每次滚动加载数——大书（上千单元）也不卡顿 */
 const PAGE_SIZE = 12;
+
+/** 响应式栏数（与原 Tailwind 断点一致：默认 2 栏 / md 3 栏 / 2xl 4 栏） */
+function useColumnCount(): number {
+  const get = () =>
+    typeof window === 'undefined' ? 2 : window.innerWidth >= 1536 ? 4 : window.innerWidth >= 768 ? 3 : 2;
+  const [cols, setCols] = useState(get);
+  useEffect(() => {
+    const onResize = () => setCols(get());
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return cols;
+}
 
 export function Feed() {
   const { t } = useTranslation();
@@ -26,6 +39,7 @@ export function Feed() {
 
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const columnCount = useColumnCount();
 
   const readSet = useMemo(
     () => new Set(Object.values(progress).flatMap((p) => p.readUnitIds)),
@@ -49,11 +63,9 @@ export function Feed() {
         );
       });
     }
-    // feedSeed 参与重算：点击「换一批」时重新随机
-    void feedSeed;
-    // 提供 unit → 书籍类型，供推荐器区分小说的顺序追更逻辑
+    // feedSeed 作为洗牌种子参与排序：点「换一批」才重新洗牌，其余重算保持顺序稳定
     const bookTypeOf = (u: { bookId: string }) => bookMap.get(u.bookId)?.bookType;
-    return recommend(candidates, { readUnitIds: readSet, marks, candidates, bookTypeOf });
+    return recommend(candidates, { readUnitIds: readSet, marks, candidates, bookTypeOf, seed: feedSeed });
   }, [units, marks, filter, search, readSet, bookMap, feedSeed]);
 
   // 切换筛选 / 搜索 / 换一批时回到首批
@@ -98,6 +110,17 @@ export function Feed() {
   }
 
   const visible = ordered.slice(0, visibleCount);
+
+  // 稳定瀑布流：按序号轮转分配到固定栏。往下滑加载新卡片时，
+  // 已有卡片永远留在原位（CSS 多栏会在加卡片时重新平衡、导致卡片跳栏）。
+  const columns = useMemo(() => {
+    const cols: Array<Array<{ unit: ReadingUnit; gi: number }>> = Array.from(
+      { length: columnCount },
+      () => [],
+    );
+    visible.forEach((unit, i) => cols[i % columnCount].push({ unit, gi: i }));
+    return cols;
+  }, [visible, columnCount]);
 
   return (
     <div className="mx-auto max-w-6xl px-3 pb-28 pt-4 sm:px-6">
@@ -153,20 +176,24 @@ export function Feed() {
         </div>
       ) : (
         <>
-          <div className="columns-2 gap-3 sm:gap-4 md:columns-3 2xl:columns-4">
-            {visible.map((unit, idx) => (
-              <FeedCard
-                key={unit.id}
-                unit={unit}
-                index={idx}
-                book={bookMap.get(unit.bookId)}
-                read={readSet.has(unit.id)}
-                favorited={!!marks.favorites[unit.id]}
-                feedback={marks.unitFeedback[unit.id]}
-                onOpen={() => openReader(unit.id, ordered.map((u) => u.id))}
-                onFavorite={() => toggleFavorite(unit.id)}
-                onFeedback={(dir) => feedback(unit.id, dir)}
-              />
+          <div className="flex gap-3 sm:gap-4">
+            {columns.map((col, ci) => (
+              <div key={ci} className="flex min-w-0 flex-1 flex-col gap-3 sm:gap-4">
+                {col.map(({ unit, gi }) => (
+                  <FeedCard
+                    key={unit.id}
+                    unit={unit}
+                    index={gi}
+                    book={bookMap.get(unit.bookId)}
+                    read={readSet.has(unit.id)}
+                    favorited={!!marks.favorites[unit.id]}
+                    feedback={marks.unitFeedback[unit.id]}
+                    onOpen={() => openReader(unit.id, ordered.map((u) => u.id))}
+                    onFavorite={() => toggleFavorite(unit.id)}
+                    onFeedback={(dir) => feedback(unit.id, dir)}
+                  />
+                ))}
+              </div>
             ))}
           </div>
           {visibleCount < ordered.length && (

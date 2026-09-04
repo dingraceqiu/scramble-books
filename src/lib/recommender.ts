@@ -24,6 +24,11 @@ export interface RecommendOptions {
   limit?: number;
   /** unitId → 书籍类型（用于区分小说的顺序追更逻辑）；缺省按非小说处理 */
   bookTypeOf?: (u: ReadingUnit) => BookType | undefined;
+  /**
+   * 新鲜度洗牌种子。同一 seed 下排序完全确定：数据更新（同步/标题回写/进度变化）
+   * 触发重算时卡片不再到处跳；只有 seed 变化（用户点「换一批」）才重新洗牌。
+   */
+  seed?: number;
 }
 
 /**
@@ -41,8 +46,21 @@ export function topicKeyOf(u: ReadingUnit): string {
   return stripped || u.sourceStart.chapterId || '';
 }
 
-export function scoreUnit(u: ReadingUnit, read: Set<string>, marks: Marks): number {
-  let s = Math.random() * 2; // 新鲜度扰动
+/**
+ * 由 (seed, unitId) 确定性导出 [0,1) 伪随机数（FNV-1a 变体）。
+ * 用它代替 Math.random() 做新鲜度扰动：排序结果可复现，Feed 不会随机跳变。
+ */
+function unitNoise(seed: number, id: string): number {
+  let h = 2166136261 ^ seed;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 100000) / 100000;
+}
+
+export function scoreUnit(u: ReadingUnit, read: Set<string>, marks: Marks, seed = 0): number {
+  let s = unitNoise(seed, u.id) * 2; // 新鲜度扰动（确定性：随 seed 变化，不随重算变化）
   if (read.has(u.id)) s -= 30;
   if (marks.favorites[u.id]) s += 4;
   const fb = marks.unitFeedback[u.id];
@@ -132,7 +150,7 @@ export function recommend(allUnits: ReadingUnit[], opts: RecommendOptions): Read
   // ── 非小说：兴趣/多样性推荐 ──────────────────────────────────────
   const scoredNonFiction = diversify(
     nonFiction
-      .map((u) => ({ u, s: scoreUnit(u, read, opts.marks) }))
+      .map((u) => ({ u, s: scoreUnit(u, read, opts.marks, opts.seed ?? 0) }))
       .sort((a, b) => b.s - a.s)
       .map((x) => x.u),
   );
