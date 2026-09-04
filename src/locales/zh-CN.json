@@ -58,7 +58,9 @@
       "favorites": "还没有收藏，点卡片上的爱心试试。",
       "search": "没有匹配的内容。"
     },
-    "nextNote": "下一条"
+    "nextNote": "下一条",
+    "nextInBook": "继续读这本书",
+    "nextRandom": "随机下一条"
   },
   "card": {
     "note": "NOTE {{index}}",

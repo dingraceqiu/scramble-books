@@ -20,12 +20,22 @@ export function ReaderModal() {
   const { t, i18n } = useTranslation();
   const {
     readerId, units, books, progress, highlights, notes, marks,
-    closeReader, nextUnit, toggleFavorite, feedback, openBookReader,
+    closeReader, nextUnit, nextUnitInBook, toggleFavorite, feedback, openBookReader,
     addHighlight, removeHighlight, addNote, removeNote,
   } = useStore();
 
   const unit = units.find((u) => u.id === readerId) ?? null;
   const book = unit ? books.find((b) => b.id === unit.bookId) : undefined;
+
+  // 同书顺序下一篇（「继续读这本书」按钮用）；已是本书最后一篇时为 null
+  const nextInBook = useMemo(() => {
+    if (!unit) return null;
+    const bookUnits = units
+      .filter((u) => u.bookId === unit.bookId)
+      .sort((a, b) => a.order - b.order);
+    const idx = bookUnits.findIndex((u) => u.id === unit.id);
+    return bookUnits[idx + 1] ?? null;
+  }, [units, unit]);
   const articleRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [noteDraft, setNoteDraft] = useState('');
@@ -318,12 +328,24 @@ export function ReaderModal() {
               <EyeOff size={18} />
               {fb === -1 && <span>{t('card.reduced')}</span>}
             </button>
+            {nextInBook && (
+              <button
+                type="button"
+                onClick={nextUnitInBook}
+                className="ml-auto flex items-center gap-2 rounded-full border border-line bg-surface px-4 py-2.5 text-sm font-medium text-ink transition-colors hover:border-accent hover:text-accent"
+              >
+                <BookOpen size={15} />
+                {t('feed.nextInBook')}
+              </button>
+            )}
             <button
               type="button"
               onClick={nextUnit}
-              className="ml-auto flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-medium text-white shadow-card transition-transform hover:scale-[1.03]"
+              className={`flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-medium text-white shadow-card transition-transform hover:scale-[1.03] ${
+                nextInBook ? '' : 'ml-auto'
+              }`}
             >
-              {t('feed.nextNote')}
+              {t('feed.nextRandom')}
               <ArrowRight size={16} />
             </button>
           </footer>

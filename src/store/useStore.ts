@@ -85,6 +85,8 @@ interface StoreState {
   openReader: (unitId: string, queue?: string[]) => void;
   closeReader: () => void;
   nextUnit: () => void;
+  /** 同书顺序下一篇（读完一章接着读下一章，绝不跳书） */
+  nextUnitInBook: () => void;
 
   openBookReader: (
     bookId: string,
@@ -406,6 +408,22 @@ export const useStore = create<StoreState>((set, get) => ({
     if (nextId) {
       set({ readerId: nextId, readerQueue: queue });
       get().markRead(nextId);
+    }
+  },
+
+  nextUnitInBook: () => {
+    const { units, readerId } = get();
+    if (!readerId) return;
+    const current = units.find((u) => u.id === readerId);
+    if (!current) return;
+    const bookUnits = units
+      .filter((u) => u.bookId === current.bookId)
+      .sort((a, b) => a.order - b.order);
+    const idx = bookUnits.findIndex((u) => u.id === readerId);
+    const next = bookUnits[idx + 1];
+    if (next) {
+      set({ readerId: next.id, readerQueue: [next.id] });
+      get().markRead(next.id);
     }
   },
 

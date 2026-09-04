@@ -58,7 +58,9 @@
       "favorites": "Nothing saved yet. Tap the heart on a card to save it.",
       "search": "Nothing matches your search."
     },
-    "nextNote": "Next note"
+    "nextNote": "Next note",
+    "nextInBook": "Continue this book",
+    "nextRandom": "Random next"
   },
   "card": {
     "note": "NOTE {{index}}",
