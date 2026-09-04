@@ -31,6 +31,15 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 应用部署在子路径（如 https://host/books/）时，API 也要带上同一前缀；
+ * Vite 会把构建时的 --base 写进 import.meta.env.BASE_URL（根路径部署时为 '/'）。
+ */
+export function apiUrl(path: string): string {
+  const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+  return `${base}${path}`;
+}
+
 async function request<T>(path: string, options: RequestInit = {}, token?: string | null): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -39,7 +48,7 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
   if (token) headers.Authorization = `Bearer ${token}`;
   let resp: Response;
   try {
-    resp = await fetch(path, { ...options, headers });
+    resp = await fetch(apiUrl(path), { ...options, headers });
   } catch {
     throw new ApiError(0, '网络不可用，请检查连接后重试');
   }

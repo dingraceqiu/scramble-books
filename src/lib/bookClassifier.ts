@@ -1,4 +1,5 @@
 import type { BookType } from '../types';
+import { apiUrl } from './cloudApi';
 
 /**
  * 书籍类型在线分类客户端（走自己的 Express 后端，后端再聚合 Google Books + 通用搜索）。
@@ -63,7 +64,7 @@ export async function classifyBookOnline(input: {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
   try {
-    const res = await fetch('/api/classify-book', {
+    const res = await fetch(apiUrl('/api/classify-book'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
