@@ -68,6 +68,14 @@ export function ReaderModal() {
       if (el) {
         const max = el.scrollHeight - el.clientHeight;
         el.scrollTo({ top: pct != null && max > 0 ? (max * pct) / 100 : 0 });
+        // 内容完整可见、无需滚动的短笔记：打开即等于读完
+        if (max <= 0 && unit && readerId) {
+          const alreadyRead = useStore
+            .getState()
+            .progress[unit.bookId]?.readUnitIds.includes(readerId);
+          if (!alreadyRead) markRead(readerId, 'feed');
+          if (useStore.getState().marks.partial?.[readerId] != null) setPartialRead(readerId, null);
+        }
       }
       setTimeout(() => {
         restoringRef.current = false;
