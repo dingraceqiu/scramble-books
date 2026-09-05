@@ -15,6 +15,7 @@ import type {
   Marks,
   Note,
   QuizAttempt,
+  ReadRange,
   ReadingProgress,
   ReadingUnit,
   SourceDocument,
@@ -299,15 +300,22 @@ export async function putProgress(p: ReadingProgress): Promise<void> {
 /**
  * 在【单个事务】内完成一本书的「改类型/重切分」全部写入：
  * 删除旧单元 → 写入新单元 → 更新文档前置标记 → 更新书记录 →
- * 重置进度 → 清理该书全部划线/笔记（重切后 unitId 全部失效）。
+ * 保留已读区间 → 清理该书全部划线/笔记（重切后 unitId 全部失效）。
  * 避免对上千个单元逐条 await 独立事务导致主线程长时间卡死。
+ *
+ * Reading State 说明：重切分只改变呈现层（ReadingUnit）边界，Canonical Source 的
+ * 章节与节点不变，readRanges 依然精确有效——重切分绝不清空阅读历史，
+ * 只把派生缓存 readUnitIds 按新单元重算。
  */
 export async function replaceBookContent(input: {
   book: Book;
   document: SourceDocument;
   units: ReadingUnit[];
+  /** 重切分前该书的已读区间（事实层，原样保留） */
+  preserveReadRanges?: ReadRange[];
 }): Promise<void> {
   const { book, document, units } = input;
+  const readRanges = input.preserveReadRanges ?? [];
   const db = await getDb();
   const tx = db.transaction(
     [
@@ -339,8 +347,8 @@ export async function replaceBookContent(input: {
   await tx.objectStore(STORES.documents).put(document);
   await tx.objectStore(STORES.progress).put({
     bookId: book.id,
-    readRanges: [],
-    readUnitIds: [],
+    readRanges,
+    readUnitIds: deriveReadUnitIds(units, readRanges),
     updatedAt: Date.now(),
   } satisfies ReadingProgress);
 

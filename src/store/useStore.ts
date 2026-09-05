@@ -437,16 +437,31 @@ export const useStore = create<StoreState>((set, get) => ({
         chapterCount: safeChapters.length,
       };
 
-      // 单事务批量写入（替代上千次独立事务，避免 IndexedDB 写风暴卡死）
-      await db.replaceBookContent({ book: updatedBook, document: updatedDoc, units });
+      // 单事务批量写入（替代上千次独立事务，避免 IndexedDB 写风暴卡死）。
+      // 重切分只改呈现层边界，原文节点不变 → readRanges 原样保留（阅读历史不丢）。
+      const preservedRanges = get().progress[bookId]?.readRanges ?? [];
+      await db.replaceBookContent({
+        book: updatedBook,
+        document: updatedDoc,
+        units,
+        preserveReadRanges: preservedRanges,
+      });
 
-      // 内存态同步（划线/笔记按书已随重切清空）
+      // 内存态同步（划线/笔记按书已随重切清空；已读区间保留、派生缓存按新单元重算）
       set((s) => ({
         books: s.books.map((b) => (b.id === bookId ? updatedBook : b)),
         units: [...s.units.filter((u) => u.bookId !== bookId), ...units],
         highlights: s.highlights.filter((h) => h.bookId !== bookId),
         notes: s.notes.filter((n) => n.bookId !== bookId),
-        progress: { ...s.progress, [bookId]: { bookId, readRanges: [], readUnitIds: [], updatedAt: Date.now() } },
+        progress: {
+          ...s.progress,
+          [bookId]: {
+            bookId,
+            readRanges: preservedRanges,
+            readUnitIds: deriveReadUnitIds(units, preservedRanges),
+            updatedAt: Date.now(),
+          },
+        },
       }));
       // 重切分后同样异步生成真 AI 标题
       if (units.length > 0) {

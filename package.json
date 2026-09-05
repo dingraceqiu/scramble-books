@@ -12,6 +12,7 @@
     "start": "bash ./scripts/start.sh",
     "ts-check": "tsc -p tsconfig.json",
     "validate": "pnpm dlx concurrently --group --names lint-tsc,lint-build,lint-style \"pnpm ts-check\" \"pnpm lint:build\" \"pnpm lint:style\"",
+    "verify:readstate": "tsx scripts/verify-reading-state.ts",
     "invite": "node scripts/invite.mjs"
   },
   "dependencies": {

@@ -45,6 +45,8 @@ export function ReaderModal() {
   /** 恢复进度提示（打开时若有上次进度则显示，滚动后消失） */
   const [resumePct, setResumePct] = useState<number | null>(null);
   const partialTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 恢复滚动进行中：抑制 onScroll 的副作用（清提示/存进度/标已读） */
+  const restoringRef = useRef(false);
 
   const unitHighlights = useMemo(
     () => highlights.filter((h) => h.unitId === readerId).sort((a, b) => b.createdAt - a.createdAt),
@@ -60,11 +62,16 @@ export function ReaderModal() {
     const el = scrollRef.current;
     const pct = readerId ? useStore.getState().marks.partial?.[readerId] : undefined;
     setResumePct(pct != null && pct >= 5 && pct < 95 ? pct : null);
+    // 恢复滚动本身会触发 onScroll，用标志位避免把进度提示瞬间清掉、把恢复位置当作用户浏览
+    restoringRef.current = true;
     requestAnimationFrame(() => {
       if (el) {
         const max = el.scrollHeight - el.clientHeight;
         el.scrollTo({ top: pct != null && max > 0 ? (max * pct) / 100 : 0 });
       }
+      setTimeout(() => {
+        restoringRef.current = false;
+      }, 200);
     });
     setSel(null);
     setNoteDraft('');
@@ -76,7 +83,7 @@ export function ReaderModal() {
    */
   const handleModalScroll = () => {
     const el = scrollRef.current;
-    if (!el || !unit) return;
+    if (!el || !unit || restoringRef.current) return;
     setResumePct(null);
     const max = el.scrollHeight - el.clientHeight;
     const pct = max <= 0 ? 100 : Math.round((el.scrollTop / max) * 100);
