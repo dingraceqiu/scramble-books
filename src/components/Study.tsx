@@ -305,7 +305,7 @@ function QuizSection() {
   const recall = masteryByLevel(attempts)[1];
 
   // 「只考已读」不变量（TD-03）：出题时强制校验 KP 与干扰项的 sourceRanges ⊆ readRanges。
-  // 不依赖「KP 集合恰好都来自已读」这个上游假设——TD-01 落地后该假设会失效。
+  // TD-01 落地后 KP 集合本身已来自已读区间窗口，这里保留代码级兜底（纵深防御）。
   const readRangesByChapter = useMemo(
     () => buildRangesByChapter(Object.values(progressMap).flatMap((p) => p.readRanges ?? [])),
     [progressMap],

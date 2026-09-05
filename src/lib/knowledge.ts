@@ -2,7 +2,9 @@
  * Learning Foundation：知识点抽取 / Level 1 测验 / Mastery 推导
  *
  * 数据铁律（对应产品构想）：
- * - Quiz 只能考已读内容：KP 只从「readRanges 完全覆盖的单元」抽取，硬规则在此把关；
+ * - Quiz 只能考已读内容：抽取资格从 readRanges 直接推导（readRanges → eligible Source
+ *   Range → KP extraction → KP.sourceRanges → isKpEligible），不经过 ReadingUnit——
+ *   同一 Canonical Source + 同一组 readRanges，无论切分如何变化，KP 资格与出题范围不变；
  * - KP 必须能回到原文：sourceRanges 记录来源；quote 必须逐字存在于原文，否则降级为无题 KP；
  * - AI 是编辑不是作者：GLM 只做抽取，quote 校验不过关就丢弃；GLM 不可用时本地兜底；
  * - Mastery 由 Attempts 推导，绝不存单一总分。
@@ -10,12 +12,23 @@
 import { apiUrl } from './cloudApi';
 import { putKnowledgePoints } from './db';
 import { isRangeCovered } from './readState';
+import type { NodeSpan } from './readState';
 import { extractCoreSentence } from './titleGen';
 import { uid } from './utils';
 import i18n from '../i18n';
-import type { KnowledgePoint, LearningLevel, QuizAttempt, ReadRange, ReadingUnit } from '../types';
+import type {
+  Chapter,
+  KnowledgePoint,
+  LearningLevel,
+  QuizAttempt,
+  ReadRange,
+  SourceDocument,
+} from '../types';
 
 const KP_BATCH = 6;
+/** 抽取窗口大小上限（软性控制 GLM 单次输入质量） */
+const WINDOW_MAX_NODES = 12;
+const WINDOW_MAX_CHARS = 2200;
 /** 本地兜底抽取器标识（GLM 成功时为模型名） */
 export const LOCAL_KP_GENERATOR = 'mock-kp-v1';
 
@@ -33,26 +46,84 @@ function quoteInText(quote: string, text: string): boolean {
   return stripForCompare(text).includes(q);
 }
 
+// ---------- 抽取窗口（readRanges 的直接投影，TD-01） ----------
+
+/**
+ * 知识点抽取窗口：由 readRanges 直接推导的一段已读原文（与 ReadingUnit 无关）。
+ * text 是窗口内 SourceNode 原文逐字拼接（\n\n 连接），只作抽取输入，不落库。
+ */
+export interface KpWindow {
+  chapterId: string;
+  chapterTitle: string;
+  startNode: number;
+  endNode: number;
+  text: string;
+}
+
+function makeWindow(chapter: Chapter, startNode: number, endNode: number): KpWindow {
+  const nodes = chapter.nodes.slice(startNode, endNode + 1);
+  return {
+    chapterId: chapter.id,
+    chapterTitle: chapter.title,
+    startNode,
+    endNode,
+    text: nodes.map((n) => n.text).join('\n\n'),
+  };
+}
+
+/**
+ * 把已读区间切成抽取窗口：只依赖 Canonical Source 与区间本身，输入里没有 ReadingUnit——
+ * 切分算法/书籍类型变化不会影响窗口集合（分割不变性的结构性保证）。
+ * frontMatter 是 Canonical Source 的稳定属性（导入时判定），按它过滤同样不破坏不变性。
+ */
+export function buildExtractionWindows(doc: SourceDocument, ranges: ReadonlyArray<NodeSpan>): KpWindow[] {
+  const byId = new Map(doc.chapters.map((c) => [c.id, c] as const));
+  const windows: KpWindow[] = [];
+  for (const range of ranges) {
+    const chapter = byId.get(range.chapterId);
+    if (!chapter || chapter.frontMatter) continue;
+    let start = range.startNode;
+    let count = 0;
+    let charCount = 0;
+    for (let i = range.startNode; i <= range.endNode; i++) {
+      const text = typeof chapter.nodes[i]?.text === 'string' ? chapter.nodes[i].text : '';
+      if (count > 0 && (count >= WINDOW_MAX_NODES || charCount + text.length > WINDOW_MAX_CHARS)) {
+        windows.push(makeWindow(chapter, start, i - 1));
+        start = i;
+        count = 0;
+        charCount = 0;
+      }
+      charCount += text.length;
+      count += 1;
+    }
+    if (count > 0) windows.push(makeWindow(chapter, start, range.endNode));
+  }
+  // 全空节点的窗口不产 KP（避免对空白区域反复空转抽取）
+  return windows.filter((w) => w.text.replace(/\s/g, '').length > 0);
+}
+
+// ---------- 知识点抽取 ----------
+
 /**
  * 本地兜底抽取：用核心句当知识点（concept 取句子前段，quote 为原句）。
  * 语言跟随原文；质量弱于 GLM，但保证离线闭环可用。
  */
-function localKnowledgePoint(unit: ReadingUnit): KnowledgePoint | null {
-  const body = unit.sourceText;
+function localKnowledgePoint(bookId: string, window: KpWindow): KnowledgePoint | null {
+  const body = window.text;
   const core = extractCoreSentence(body)?.text ?? body.split(/(?<=[。！？!?])/)[0] ?? '';
   const sentence = core.trim();
   if (sentence.length < 8) return null;
   const concept = sentence.replace(/[。！？!?…]+$/, '').slice(0, 20);
   return {
     id: uid('kp'),
-    bookId: unit.bookId,
-    chapterId: unit.sourceStart.chapterId,
+    bookId,
+    chapterId: window.chapterId,
     sourceRanges: [
       {
-        chapterId: unit.sourceStart.chapterId,
-        chapterTitle: unit.sourceStart.chapterTitle,
-        startNode: unit.sourceStart.startNode,
-        endNode: unit.sourceEnd.endNode,
+        chapterId: window.chapterId,
+        chapterTitle: window.chapterTitle,
+        startNode: window.startNode,
+        endNode: window.endNode,
       },
     ],
     concept,
@@ -70,32 +141,36 @@ interface ServerKp {
   quote?: string;
 }
 
+function windowKey(w: NodeSpan): string {
+  return `${w.chapterId}#${w.startNode}-${w.endNode}`;
+}
+
 async function requestServerKps(
-  batch: ReadingUnit[],
-): Promise<Array<{ unit: ReadingUnit; concept: string; explanation: string; quote?: string; generator: string }> | null> {
+  batch: KpWindow[],
+): Promise<Array<{ window: KpWindow; concept: string; explanation: string; quote?: string; generator: string }> | null> {
   try {
     const resp = await fetch(apiUrl('/api/knowledge-points'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        items: batch.map((u) => ({ id: u.id, text: u.sourceText.slice(0, 2500) })),
+        items: batch.map((w) => ({ id: windowKey(w), text: w.text.slice(0, 2500) })),
       }),
     });
     if (!resp.ok) return null;
     const data = (await resp.json()) as { ok?: boolean; generator?: string; results?: ServerKp[] };
     if (!data.ok || !Array.isArray(data.results)) return null;
-    const byId = new Map(batch.map((u) => [u.id, u] as const));
+    const byKey = new Map(batch.map((w) => [windowKey(w), w] as const));
     const generator = data.generator || 'glm';
-    const out: Array<{ unit: ReadingUnit; concept: string; explanation: string; quote?: string; generator: string }> = [];
+    const out: Array<{ window: KpWindow; concept: string; explanation: string; quote?: string; generator: string }> = [];
     for (const r of data.results) {
-      const unit = r?.id ? byId.get(r.id) : undefined;
-      if (!unit || !r.concept?.trim() || !r.explanation?.trim()) continue;
+      const window = r?.id ? byKey.get(r.id) : undefined;
+      if (!window || !r.concept?.trim() || !r.explanation?.trim()) continue;
       out.push({
-        unit,
+        window,
         concept: r.concept.trim().slice(0, 40),
         explanation: r.explanation.trim().slice(0, 300),
         // quote 忠实度后校验：不是原文逐字摘录的一律丢弃（宁缺毋滥）
-        quote: r.quote && quoteInText(r.quote, unit.sourceText) ? r.quote.trim().slice(0, 200) : undefined,
+        quote: r.quote && quoteInText(r.quote, window.text) ? r.quote.trim().slice(0, 200) : undefined,
         generator,
       });
     }
@@ -106,24 +181,20 @@ async function requestServerKps(
 }
 
 /**
- * 为一本书抽取知识点（只处理已读且尚无 KP 的单元），分批执行，GLM 优先、本地兜底。
- * @param readUnits 已读单元（调用方从 readRanges 推导后传入，这里不再判定已读）
- * @param existing 已有知识点（按单元区间去重用）
+ * 为一批抽取窗口生成知识点，分批执行，GLM 优先、本地兜底。
+ * @param bookId 书 id
+ * @param windows 抽取窗口（调用方用 subtractRanges(readRanges, 已有KP覆盖) 推导后传入，
+ *                这里不再判定「是否已读」也看不到 ReadingUnit）
  * @param onSaved 每批落库后回调
  * @returns 本轮新增数量（该书有任务在跑时返回 null）
  */
 export async function extractKnowledgePointsForBook(
   bookId: string,
-  readUnits: ReadingUnit[],
-  existing: KnowledgePoint[],
+  windows: KpWindow[],
   onSaved?: (saved: KnowledgePoint[]) => void,
 ): Promise<number | null> {
   if (inflight.has(bookId)) return null;
-  // 已有 KP 覆盖的单元不再重复抽取（按单元起点 + 章匹配）
-  const coveredStarts = new Set(existing.map((kp) => `${kp.sourceRanges[0]?.chapterId}#${kp.sourceRanges[0]?.startNode}`));
-  const pending = readUnits.filter(
-    (u) => u.sourceText?.trim() && !coveredStarts.has(`${u.sourceStart.chapterId}#${u.sourceStart.startNode}`),
-  );
+  const pending = windows.filter((w) => w.text.replace(/\s/g, '').length > 0);
   if (pending.length === 0) return 0;
   inflight.add(bookId);
   let created = 0;
@@ -135,17 +206,17 @@ export async function extractKnowledgePointsForBook(
       const handled = new Set<string>();
       if (serverResult && serverResult.length > 0) {
         for (const r of serverResult) {
-          handled.add(r.unit.id);
-          const kp: KnowledgePoint = {
+          handled.add(windowKey(r.window));
+          saved.push({
             id: uid('kp'),
             bookId,
-            chapterId: r.unit.sourceStart.chapterId,
+            chapterId: r.window.chapterId,
             sourceRanges: [
               {
-                chapterId: r.unit.sourceStart.chapterId,
-                chapterTitle: r.unit.sourceStart.chapterTitle,
-                startNode: r.unit.sourceStart.startNode,
-                endNode: r.unit.sourceEnd.endNode,
+                chapterId: r.window.chapterId,
+                chapterTitle: r.window.chapterTitle,
+                startNode: r.window.startNode,
+                endNode: r.window.endNode,
               },
             ],
             concept: r.concept,
@@ -153,14 +224,13 @@ export async function extractKnowledgePointsForBook(
             quote: r.quote,
             generatedBy: r.generator,
             createdAt: Date.now(),
-          };
-          saved.push(kp);
+          });
         }
       }
-      // 服务端失败或某单元没拿到结果 → 本地兜底，保证离线也有知识点
-      for (const u of batch) {
-        if (handled.has(u.id)) continue;
-        const kp = localKnowledgePoint(u);
+      // 服务端失败或某窗口没拿到结果 → 本地兜底，保证离线也有知识点
+      for (const w of batch) {
+        if (handled.has(windowKey(w))) continue;
+        const kp = localKnowledgePoint(bookId, w);
         if (kp) saved.push(kp);
       }
       if (saved.length > 0) {

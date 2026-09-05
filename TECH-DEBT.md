@@ -5,13 +5,14 @@
 
 ---
 
-## TD-01 — KP eligibility 仍是「完全已读的 ReadingUnit」粒度（MVP 简化）
+## TD-01 — KP eligibility 脱离 ReadingUnit（✅ 已落地 2026-09-05）
 
-- **现状**：`useStore.ensureKnowledgePoints` 以 `isUnitRead`（readRanges 完全覆盖整个单元）为抽取门槛。
-- **目标**：`KnowledgePoint.sourceRanges ⊆ ReadingProgress.readRanges` 的直接判定，不再绕回 ReadingUnit。
-- **为什么现在可行**：`readState.isRangeCovered` 已经能表达目标判定（`scripts/verify-reading-state.ts` 场景 6 演示：KP 范围 [3..5] 未读 → false；读完 → true）。
-- **改造点**：抽取入口从「已读单元的 sourceText」改为「已读区间的原文节点文本」（需从 documents store 按 range 取节点），KP 去重键从单元起点改为区间本身。
-- **风险提示**：改造后干扰项池也必须按同一 eligibility 过滤（见 TD-03）。
+- **原状**：`useStore.ensureKnowledgePoints` 以 `isUnitRead`（readRanges 完全覆盖整个单元）为抽取门槛，资格依赖呈现层切分。
+- **已落地的新链路**：`readRanges → subtractRanges(readRanges, 已有KP覆盖) → buildExtractionWindows(doc, delta) → extractKnowledgePointsForBook → KP.sourceRanges → isKpEligible()`。链路任何一环不接受 ReadingUnit 输入（`src/lib/readState.ts` 的 `subtractRanges`、`src/lib/knowledge.ts` 的 `buildExtractionWindows` / 窗口版抽取器）。
+- **核心 invariant（已自动化）**：同一 Canonical Source + 同一组 readRanges，即使 ReadingUnit segmentation 完全改变，KP 资格与 Quiz 可使用的已读范围也不变。契约测试 `pnpm verify:kp-invariance`（scripts/verify-kp-invariance.ts，22 项断言）覆盖：真实/对抗两种切分下呈现层投影变化而学习层不变、抽取管线真实落库回归、增量阅读 delta 零重叠、无 ReadingUnit 的「其他」类书籍直达 Quiz、越界 KP 仍被 isKpEligible 拒绝。
+- **去重语义变更**：从「按单元起点去重」升级为「区间差集去重」——已有 KP 覆盖的已读区域不再重复抽取；readRanges 增长时 delta 恰为新读区域。旧数据（单元起点时代的 KP.sourceRanges）与差集运算天然兼容。
+- **frontMatter 过滤说明**：`buildExtractionWindows` 跳过 frontMatter 章。frontMatter 是 Canonical Source 的导入时稳定属性（非呈现层），不破坏分割不变性，只避免从版权页/目录产出噪声 KP。
+- **风险提示（仍然有效）**：干扰项池必须继续按同一 eligibility 过滤——已由 TD-03 的 `buildRecallQuestion` 强制 + `verify:quiz-leakage` 回归保障。
 
 ## TD-02 — Learning 层任何对象不得依赖 ReadingUnit ID 作为永久身份
 
@@ -58,6 +59,7 @@
 | Layer 1 纯逻辑 | `pnpm verify:readstate` | readRanges 合并/覆盖/迁移/推导数学模型 | 20/20 ✓ |
 | Layer 2 持久化集成 | `pnpm verify:persistence` | db.ts 全链路：建库→导入→阅读→reload→normalize→重切分→快照 round-trip→级联删除（'idb' 用内存 shim，业务代码全真） | 25/25 ✓ |
 | TD-03 契约 | `pnpm verify:quiz-leakage` | Quiz 全字段「只考已读」300 轮不变量 | 2709 项 ✓ |
+| TD-01 契约 | `pnpm verify:kp-invariance` | 分割不变性：切分全变而 KP 资格/出题范围不变；增量去重；无单元书籍可达 Quiz | 22 项 ✓ |
 
 Layer 2 曾抓到真实缺陷：loadAll 对**未合并/乱序**的存量 readRanges 直接信任，`isRangeCovered` 的提前返回语义会导致已读被误判为未读——已在 `normalizeProgress` 强制 `mergeReadRanges`（持久化边界不信任写入方的有序性）。
 

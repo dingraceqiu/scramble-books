@@ -127,3 +127,68 @@ export function deriveReadUnitIds(bookUnits: ReadingUnit[], ranges: ReadRange[])
 export function coveredNodeCount(ranges: ReadRange[]): number {
   return ranges.reduce((sum, r) => sum + (r.endNode - r.startNode + 1), 0);
 }
+
+/**
+ * 最小区间形状：ReadRange 与 SourceRange 的公共子集。
+ * 区间代数（差集/合并）不关心 via / at / chapterTitle，只在此坐标系上运算。
+ */
+export interface NodeSpan {
+  chapterId: string;
+  startNode: number;
+  endNode: number;
+}
+
+/** NodeSpan 版合并（同章内重叠或相邻并为一段，输出按 chapterId + startNode 排序） */
+function mergeSpans(spans: NodeSpan[]): NodeSpan[] {
+  const sorted = [...spans]
+    .filter((s) => s && typeof s.chapterId === 'string')
+    .sort((a, b) => a.chapterId.localeCompare(b.chapterId) || a.startNode - b.startNode);
+  const out: NodeSpan[] = [];
+  for (const s of sorted) {
+    const last = out[out.length - 1];
+    if (last && last.chapterId === s.chapterId && s.startNode <= last.endNode + 1) {
+      last.endNode = Math.max(last.endNode, s.endNode);
+    } else {
+      out.push({ ...s });
+    }
+  }
+  return out;
+}
+
+/**
+ * 区间差集：返回 minuend 中未被 subtrahend 覆盖的部分（逐章相减，结果已合并）。
+ *
+ * TD-01 基础运算：KP 抽取窗口 = readRanges − 已有 KP 覆盖区间。
+ * 输入输出只依赖 Canonical Source 坐标，与 ReadingUnit 切分无关——
+ * 这是「Learning 不依赖 Presentation」不变量的算术保证。
+ */
+export function subtractRanges(minuend: NodeSpan[], subtrahend: NodeSpan[]): NodeSpan[] {
+  const holesByChapter = new Map<string, Array<{ start: number; end: number }>>();
+  for (const s of mergeSpans(subtrahend)) {
+    const arr = holesByChapter.get(s.chapterId);
+    if (arr) arr.push({ start: s.startNode, end: s.endNode });
+    else holesByChapter.set(s.chapterId, [{ start: s.startNode, end: s.endNode }]);
+  }
+  const out: NodeSpan[] = [];
+  for (const m of mergeSpans(minuend)) {
+    const holes = holesByChapter.get(m.chapterId);
+    if (!holes || holes.length === 0) {
+      out.push({ chapterId: m.chapterId, startNode: m.startNode, endNode: m.endNode });
+      continue;
+    }
+    let cursor = m.startNode;
+    for (const h of holes) {
+      if (cursor > m.endNode) break;
+      if (h.end < cursor) continue;
+      if (h.start > m.endNode) break;
+      if (h.start > cursor) {
+        out.push({ chapterId: m.chapterId, startNode: cursor, endNode: h.start - 1 });
+      }
+      cursor = Math.max(cursor, h.end + 1);
+    }
+    if (cursor <= m.endNode) {
+      out.push({ chapterId: m.chapterId, startNode: cursor, endNode: m.endNode });
+    }
+  }
+  return out;
+}

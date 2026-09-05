@@ -28,7 +28,7 @@ import * as db from '../lib/db';
 import { segmentBook, lastReadUnit } from '../lib/segmenter';
 import { parseFile, parseTxtText } from '../lib/parsers';
 import { pickNext, topicKeyOf } from '../lib/recommender';
-import { extractKnowledgePointsForBook } from '../lib/knowledge';
+import { extractKnowledgePointsForBook, buildExtractionWindows } from '../lib/knowledge';
 import {
   buildRangesByChapter,
   coveredNodeCount,
@@ -36,6 +36,7 @@ import {
   isUnitRead,
   mergeReadRanges,
   rangesFromUnits,
+  subtractRanges,
   unitSpans,
 } from '../lib/readState';
 import { SAMPLE_FILENAME, SAMPLE_TEXT } from '../lib/sample';
@@ -757,27 +758,26 @@ export const useStore = create<StoreState>((set, get) => ({
   // ---------- 学习层 ----------
 
   ensureKnowledgePoints: async () => {
-    const { units, progress, knowledgePoints, books } = get();
+    const { progress, knowledgePoints, books } = get();
     if (kpGeneratingGuard) return;
     kpGeneratingGuard = true;
     set({ kpGenerating: true });
     try {
-      // 只考已读的硬规则：抽取范围 = readRanges 完全覆盖的单元
-      const byChapterByBook = new Map<string, Map<string, ReadRange[]>>();
-      for (const p of Object.values(progress)) {
-        byChapterByBook.set(
-          p.bookId,
-          buildRangesByChapter(p.readRanges ?? []),
-        );
-      }
+      // TD-01：抽取资格只由 readRanges 决定，不经过 ReadingUnit——
+      // readRanges − 已有 KP 覆盖 = 待抽取窗口（切分变化不影响资格与去重）。
       for (const book of books) {
-        const byChapter = byChapterByBook.get(book.id) ?? new Map();
-        const readUnits = units.filter(
-          (u) => u.bookId === book.id && isUnitRead(u, byChapter),
-        );
-        if (readUnits.length === 0) continue;
+        const p = progress[book.id];
+        const readMerged = p?.readRanges?.length ? mergeReadRanges(p.readRanges) : [];
+        if (readMerged.length === 0) continue;
         const existing = knowledgePoints.filter((kp) => kp.bookId === book.id);
-        await extractKnowledgePointsForBook(book.id, readUnits, existing, (saved) => {
+        const kpCovered = existing.flatMap((kp) => kp.sourceRanges ?? []);
+        const delta = subtractRanges(readMerged, kpCovered);
+        if (delta.length === 0) continue;
+        const doc = await db.getDocument(book.id);
+        if (!doc) continue;
+        const windows = buildExtractionWindows(doc, delta);
+        if (windows.length === 0) continue;
+        await extractKnowledgePointsForBook(book.id, windows, (saved) => {
           set((s) => ({
             knowledgePoints: [...s.knowledgePoints, ...saved.filter(
               (kp) => !s.knowledgePoints.some((old) => old.id === kp.id),
