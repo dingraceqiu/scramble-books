@@ -101,6 +101,18 @@ test: 测试        docs: 文档        chore: 工程维护
 perf: 性能优化
 ```
 
+### 分支规则（开始任何非微小任务前先判断）
+
+判断标准不是「改了多少行代码」，而是**修改失败后的恢复成本和影响范围**。不确定时优先开 Branch。
+
+默认创建 Branch：新增完整功能、大规模重构、数据 Schema/Migration 修改、核心数据模型或状态管理修改、高风险模块（认证/同步/存储）修改、一次任务涉及多个核心模块、预计多个 Commit、实验性方案、技术方案未定、失败后难以快速人工恢复、可能影响已有稳定功能。
+
+可直接在 main：文案、样式、README/文档、明确且低风险的小 Bug、局部且容易验证和撤销的修改。
+
+流程：确认工作区状态 → 从稳定 main 创建语义明确的 Branch → 开发 → 运行适用测试 → 验证通过后合并回 main。命名：`feat/xxx`、`fix/xxx`、`refactor/xxx`、`experiment/xxx`。
+
+> 本项目对应高风险模块：`server/lib/cloudDb.ts`、`server/routes/auth.ts`、`src/lib/sync.ts`、`src/lib/db.ts`、`src/store/useStore.ts`（readRanges 相关改动一律视为核心数据模型修改）。
+
 ## 包管理规范
 
 **仅允许使用 pnpm** 作为包管理器，**严禁使用 npm 或 yarn**。
