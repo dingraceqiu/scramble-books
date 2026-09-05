@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/useStore';
 import { estimateReadingMinutes, cn } from '../lib/utils';
 import { buildRecallQuestion, masteryByLevel } from '../lib/knowledge';
+import { buildRangesByChapter } from '../lib/readState';
 import { BookCover } from './BookCover';
 
 export function Study() {
@@ -278,6 +279,7 @@ interface ActiveQuestion {
 function QuizSection() {
   const { t } = useTranslation();
   const kps = useStore((s) => s.knowledgePoints);
+  const progressMap = useStore((s) => s.progress);
   const attempts = useStore((s) => s.quizAttempts);
   const kpGenerating = useStore((s) => s.kpGenerating);
   const books = useStore((s) => s.books);
@@ -302,12 +304,19 @@ function QuizSection() {
   const bookTitle = useMemo(() => new Map(books.map((b) => [b.id, b.title])), [books]);
   const recall = masteryByLevel(attempts)[1];
 
+  // 「只考已读」不变量（TD-03）：出题时强制校验 KP 与干扰项的 sourceRanges ⊆ readRanges。
+  // 不依赖「KP 集合恰好都来自已读」这个上游假设——TD-01 落地后该假设会失效。
+  const readRangesByChapter = useMemo(
+    () => buildRangesByChapter(Object.values(progressMap).flatMap((p) => p.readRanges ?? [])),
+    [progressMap],
+  );
+
   const startRound = () => {
     const candidates = [...kps].sort(() => Math.random() - 0.5);
     const qs: ActiveQuestion[] = [];
     for (const kp of candidates) {
       if (qs.length >= 5) break;
-      const q = buildRecallQuestion(kp, kps);
+      const q = buildRecallQuestion(kp, kps, { readRangesByChapter });
       if (q) qs.push(q);
     }
     setRound(qs);

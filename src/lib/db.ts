@@ -7,7 +7,7 @@
 import { openDB, type IDBPDatabase } from 'idb';
 import { generateAiMeta, TITLE_GENERATOR, getTargetLang } from './titleGen';
 import { hashStr, estimateReadingMinutes } from './utils';
-import { deriveReadUnitIds, rangesFromUnits } from './readState';
+import { deriveReadUnitIds, mergeReadRanges, rangesFromUnits } from './readState';
 import type {
   Book,
   Highlight,
@@ -76,10 +76,13 @@ function normalizeProgress(
   unitsByBook: Map<string, ReadingUnit[]>,
 ): ReadingProgress {
   const bookUnits = unitsByBook.get(p.bookId) ?? [];
-  const readRanges =
+  // 存量区间一律合并排序后再使用：不信任写入方的有序性（乱序/未合并的区间
+  // 会让 isRangeCovered 的提前返回语义失效，导致已读被误判为未读）
+  const readRanges = mergeReadRanges(
     Array.isArray(p.readRanges) && p.readRanges.length > 0
       ? p.readRanges
-      : rangesFromUnits(bookUnits, p.readUnitIds ?? [], p.updatedAt || Date.now());
+      : rangesFromUnits(bookUnits, p.readUnitIds ?? [], p.updatedAt || Date.now()),
+  );
   return {
     bookId: p.bookId,
     readRanges,

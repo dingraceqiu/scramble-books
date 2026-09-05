@@ -9,10 +9,11 @@
  */
 import { apiUrl } from './cloudApi';
 import { putKnowledgePoints } from './db';
+import { isRangeCovered } from './readState';
 import { extractCoreSentence } from './titleGen';
 import { uid } from './utils';
 import i18n from '../i18n';
-import type { KnowledgePoint, LearningLevel, QuizAttempt, ReadingUnit } from '../types';
+import type { KnowledgePoint, LearningLevel, QuizAttempt, ReadRange, ReadingUnit } from '../types';
 
 const KP_BATCH = 6;
 /** 本地兜底抽取器标识（GLM 成功时为模型名） */
@@ -177,13 +178,30 @@ export async function extractKnowledgePointsForBook(
 // ---------- Level 1 测验（Recall：识别原文表述） ----------
 
 /**
+ * 「只考已读」不变量（TD-03）：KP 的全部 sourceRanges 都被 readRanges 覆盖才算合格。
+ * 未提供 readRangesByChapter 时视为不检查（兼容旧调用），Quiz 出题路径必须传入。
+ */
+export function isKpEligible(
+  kp: KnowledgePoint,
+  readRangesByChapter?: Map<string, ReadRange[]>,
+): boolean {
+  if (!readRangesByChapter) return true;
+  return (kp.sourceRanges ?? []).every((r) =>
+    isRangeCovered(readRangesByChapter.get(r.chapterId), r.startNode, r.endNode),
+  );
+}
+
+/**
  * 为一个知识点生成 Level 1 识别题：四选一，找出作者原文表述。
  * 正确项 = quote（原文逐字摘录）；干扰项 = 其他知识点的 quote（优先同书）。
- * quote 缺失的知识点不出题（保证每道题都能回到原文）。
+ * 铁律（TD-03 回归契约，见 scripts/verify-quiz-leakage.ts）：提供 readRangesByChapter
+ * 时，题干 KP 与全部干扰项都必须通过「只考已读」检查——未读 Source 的文本不得进入
+ * 题目的任何一个字段。quote 缺失的知识点不出题（保证每道题都能回到原文）。
  */
 export function buildRecallQuestion(
   kp: KnowledgePoint,
   distractorPool: KnowledgePoint[],
+  eligibility?: { readRangesByChapter?: Map<string, ReadRange[]> },
 ): {
   id: string;
   knowledgePointId: string;
@@ -195,8 +213,14 @@ export function buildRecallQuestion(
   evidence: string;
 } | null {
   if (!kp.quote) return null;
+  const readRangesByChapter = eligibility?.readRangesByChapter;
+  if (!isKpEligible(kp, readRangesByChapter)) return null;
   const pool = distractorPool.filter(
-    (d) => d.id !== kp.id && d.quote && stripForCompare(d.quote) !== stripForCompare(kp.quote!),
+    (d) =>
+      d.id !== kp.id &&
+      d.quote &&
+      isKpEligible(d, readRangesByChapter) &&
+      stripForCompare(d.quote) !== stripForCompare(kp.quote!),
   );
   const sameBook = pool.filter((d) => d.bookId === kp.bookId);
   const picked: string[] = [];
