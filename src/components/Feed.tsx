@@ -3,7 +3,7 @@ import { RefreshCw, Search, Upload } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/useStore';
 import { recommend } from '../lib/recommender';
-import { buildRangesByChapter, isUnitRead } from '../lib/readState';
+import { buildRangesByChapter, coveredNodeCount, isUnitRead } from '../lib/readState';
 import { FeedCard } from './FeedCard';
 import { BrandLogo } from './icons/Logo';
 import type { FeedFilter, ReadingUnit } from '../types';
@@ -228,9 +228,18 @@ export function Feed() {
   );
 
   function totalCoverage(): string {
-    const total = units.length;
-    if (total === 0) return '0%';
-    const readCount = units.filter((u) => readSet.has(u.id)).length;
-    return `${Math.round((readCount / total) * 100)}%`;
+    // 口径统一（Canonical Source）：Feed 内书籍聚合的节点级覆盖率，与书库/Reader 同源；
+    // 返回不带 % 的数字，百分号由 i18n 模板提供（修复 0%% 双百分号）
+    const bookIds = new Set(units.map((u) => u.bookId));
+    let covered = 0;
+    let total = 0;
+    for (const bookId of bookIds) {
+      const book = books.find((b) => b.id === bookId);
+      if (!book?.nodeCount) continue;
+      total += book.nodeCount;
+      covered += coveredNodeCount(progress[bookId]?.readRanges ?? []);
+    }
+    if (total === 0) return '0';
+    return String(Math.min(100, Math.round((covered / total) * 100)));
   }
 }
