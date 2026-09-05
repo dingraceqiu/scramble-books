@@ -71,10 +71,9 @@
 - **后果**：在 Feed 弹层产生的划线/笔记 `chapterId/nodeIndex` 为空，Reader 里不渲染（`marksByNode` 依赖这两个字段，`ReaderView.tsx:341-351`），Study 页跳回原文也只能落到 null anchor。
 - **建议**：Feed 弹层的段落本来就来自 `unit.sourceStart` 区间，按段落序号映射回节点下标即可补上 Source Range。**不需要架构返工。**
 
-### 2.6 阅读覆盖率有两套口径 —— P2
-- **位置**：书库/弹层用「已读单元数/总单元数」（`coverageOf`、`ReaderModal.tsx:83`）；Reader 顶栏用「已读节点数/总节点数」（`ReaderView.tsx:123-131`）。两者数字会不一致。
-- **差异**：构想第十四/二十二节的 Reading Coverage 期望最终是「段落级 Source Range 覆盖率」。
-- **建议**：统一到一个函数（建议以节点区间并集为准），UI 各处复用。**不需要架构返工。**
+### 2.6 阅读覆盖率有两套口径 —— ✅ 已解决（2026-09-05，Coverage 口径统一）
+- **原状**：书库/弹层用「已读单元数/总单元数」；Reader 顶栏用「已读节点数/总节点数」，数字不一致。
+- **现状**：唯一权威口径 `readState.coverageOfNodes(readRanges, book.nodeCount)`（已读节点数/全书节点数，Canonical Source 坐标系，对切分不变）；书库 `coverageOf`、弹层 `ReaderModal`、Reader 顶栏与目录章节条全部复用同一公式，「其他」类无单元书无分支口径。契约测试见 `verify:readstate` 第 7 组与 `verify:kp-invariance` 1.5/6/7 组。
 
 ### 2.7 划线的定位粒度是「节点级」不是「字符偏移级」 —— P2
 - **位置**：`Highlight` 只有 `chapterId + nodeIndex`（`src/types.ts:145-157`），回显靠文本匹配包裹（`ReaderView.tsx:354-398`）。

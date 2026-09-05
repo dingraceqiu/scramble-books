@@ -17,7 +17,7 @@ import { useStore } from '../store/useStore';
 import { useReaderPrefs, FONT_SIZE_PX, LINE_HEIGHT } from '../store/useReaderPrefs';
 import type { Chapter, HighlightColor, SourceNode } from '../types';
 import { unitAtNode } from '../lib/segmenter';
-import { readNodeSetFromRanges } from '../lib/readState';
+import { coverageOfNodes, readNodeSetFromRanges } from '../lib/readState';
 import { formatReadingMinutes, estimateReadingMinutes, cn } from '../lib/utils';
 import { SettingsPanel } from './reader/SettingsPanel';
 import { BookmarkPanel } from './reader/MarksPanels';
@@ -95,7 +95,8 @@ export function ReaderView() {
     [bookProgress],
   );
 
-  // 章节进度（只统计正文节点：标题节点会随滚动被标记已读，但不计入分母）
+  // 章节进度（全节点宇宙，与书级覆盖率 coverageOfNodes / book.nodeCount 同一口径：
+  // 标题节点也是 Exposure 的一部分，各章之和恰等于顶栏百分比）
   const chapterStats = useMemo(() => {
     const stats = new Map<string, { read: number; total: number }>();
     for (const ch of chapters) {
@@ -103,7 +104,6 @@ export function ReaderView() {
       let read = 0;
       let total = 0;
       for (const n of ch.nodes) {
-        if (n.type === 'heading') continue;
         total++;
         if (set?.has(n.index)) read++;
       }
@@ -112,15 +112,15 @@ export function ReaderView() {
     return stats;
   }, [chapters, readNodeSet]);
 
-  const totalRead = useMemo(
-    () => Array.from(chapterStats.values()).reduce((sum, s) => sum + s.read, 0),
-    [chapterStats],
-  );
   const totalNodes = useMemo(
     () => Array.from(chapterStats.values()).reduce((sum, s) => sum + s.total, 0),
     [chapterStats],
   );
-  const overallPct = totalNodes > 0 ? Math.round((totalRead / totalNodes) * 100) : 0;
+  // 顶栏与书库/弹层共用同一权威口径（Canonical Source：已读节点数 / book.nodeCount），
+  // nodeCount 异常时回退到当前文档统计，保证渲染层不因坏数据归零
+  const overallPct = Math.round(
+    coverageOfNodes(bookProgress?.readRanges, book?.nodeCount || totalNodes) * 100,
+  );
   const readMinutes = useMemo(() => {
     const readIds = new Set(bookProgress?.readUnitIds ?? []);
     return bookUnits

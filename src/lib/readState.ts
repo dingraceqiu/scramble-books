@@ -129,6 +129,19 @@ export function coveredNodeCount(ranges: ReadRange[]): number {
 }
 
 /**
+ * 阅读覆盖率（唯一权威口径）：已读节点数 / 全书节点数（book.nodeCount）。
+ *
+ * 分子分母都在 Canonical Source 坐标系上，对 ReadingUnit 切分不变；
+ * 有单元书与「其他」类无单元书共用同一公式，不存在分支口径。
+ * 输入先做防御性合并（不信任写入方有序性），结果收敛到 [0,1]。
+ */
+export function coverageOfNodes(readRanges: ReadRange[] | undefined, nodeCount: number): number {
+  if (!nodeCount || nodeCount <= 0) return 0;
+  const covered = coveredNodeCount(mergeReadRanges(readRanges ?? []));
+  return Math.min(1, covered / nodeCount);
+}
+
+/**
  * 最小区间形状：ReadRange 与 SourceRange 的公共子集。
  * 区间代数（差集/合并）不关心 via / at / chapterTitle，只在此坐标系上运算。
  */

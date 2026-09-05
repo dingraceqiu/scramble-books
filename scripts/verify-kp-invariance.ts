@@ -22,6 +22,7 @@ import * as db from '../src/lib/db.ts';
 import { segmentBook } from '../src/lib/segmenter.ts';
 import {
   buildRangesByChapter,
+  coverageOfNodes,
   deriveReadUnitIds,
   isRangeCovered,
   isUnitRead,
@@ -143,6 +144,21 @@ async function main(): Promise<void> {
     projA.size !== projB.size || [...projA].some((id) => !projB.has(id)),
   );
 
+  // ---------- 1.5 Coverage 唯一口径对分割不变（coverageOfNodes，Canonical Source 宇宙） ----------
+  // b-inv 全书节点：ch1 23 + ch2 11 + ch3 9 = 43；已读 23 + 7 + 4 = 34
+  const bookNodeCount = doc.chapters.reduce((sum, c) => sum + c.nodes.length, 0);
+  check('夹具节点总数 = 43', bookNodeCount === 43);
+  const coverage1 = coverageOfNodes(readRanges, bookNodeCount);
+  check('覆盖率 = 已读节点数/全书节点数（34/43）', Math.abs(coverage1 - 34 / 43) < 1e-9);
+  check(
+    '呈现层投影变了，覆盖率不变（projA ≠ projB，coverage 同值）',
+    coverage1 === coverageOfNodes(readRanges, bookNodeCount),
+  );
+  check(
+    '重切分语义场景：unitsA/unitsB 存在与否不影响 coverage（函数无单元输入）',
+    coverage1 === coverageOfNodes(mergeReadRanges(readRanges), bookNodeCount),
+  );
+
   // ---------- 2. 单元级旧判定为何不可靠（不变量的动机，留档于测试） ----------
   // 同一组 readRanges 下，把已读区域 [0..6] 切成独立单元判「已读」，
   // 切成跨边界大单元就判「未读」——资格随呈现层漂移，这正是被废除的旧路径。
@@ -223,6 +239,7 @@ async function main(): Promise<void> {
   const kps2 = all2.knowledgePoints.filter((kp) => kp.bookId === 'b-inv');
   const byChapter2 = buildRangesByChapter(readRanges2);
   check('增长后共 5 个 KP，全部在新 readRanges 下合格', kps2.length === 5 && kps2.every((kp) => isKpEligible(kp, byChapter2)));
+  check('增量后覆盖率精确变为 38/43', Math.abs(coverageOfNodes(readRanges2, bookNodeCount) - 38 / 43) < 1e-9);
 
   // ---------- 7. 「其他」类书籍：无任何 ReadingUnit 仍可到达 Quiz ----------
   const otherDoc = makeDoc('b-other', [
@@ -243,6 +260,10 @@ async function main(): Promise<void> {
   check(
     '无单元书籍抽取并全部合格（Reader → readRanges → KP → Quiz 打通）',
     created3 !== null && created3 > 0 && otherKps.length === created3 && otherKps.every((kp) => isKpEligible(kp, buildRangesByChapter(otherRead))),
+  );
+  check(
+    '无单元书籍覆盖率同口径可算（4/4 = 1，无需任何分支）',
+    coverageOfNodes(otherRead, otherDoc.chapters.reduce((sum, c) => sum + c.nodes.length, 0)) === 1,
   );
 
   console.log(`\n${passed} 项断言通过${failures.length > 0 ? `，${failures.length} 项失败` : '，全部通过 ✓'}`);

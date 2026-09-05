@@ -15,6 +15,7 @@ import type { Chapter, ReadRange, ReadingUnit, SourceNode } from '../src/types.t
 import {
   buildRangesByChapter,
   coveredNodeCount,
+  coverageOfNodes,
   deriveReadUnitIds,
   isRangeCovered,
   isUnitRead,
@@ -213,6 +214,24 @@ function testKpEligibilityBasis(): void {
   check('KP 范围读完 → isRangeCovered 为 true（可出题）', isRangeCovered(buildRangesByChapter(ranges2).get('ch6'), kpRange.startNode, kpRange.endNode));
 }
 
+function testCoverageOfNodes(): void {
+  console.log('7. Coverage 唯一口径（coverageOfNodes，Canonical Source 全节点宇宙）');
+  const rr = (chapterId: string, startNode: number, endNode: number): ReadRange => ({
+    chapterId, startNode, endNode, via: 'reader', at: 1,
+  });
+  check('空 readRanges → 0', coverageOfNodes([], 10) === 0);
+  check('undefined readRanges → 0', coverageOfNodes(undefined, 10) === 0);
+  check('nodeCount 为 0/负 → 0（坏数据不产生 NaN/负数）', coverageOfNodes([rr('c', 0, 1)], 0) === 0 && coverageOfNodes([rr('c', 0, 1)], -3) === 0);
+  check('部分阅读 5/10 → 0.5', Math.abs(coverageOfNodes([rr('c', 0, 4)], 10) - 0.5) < 1e-9);
+  check(
+    '未合并/相邻区间先合并再计数（[0..3]+[3..5] = 6 节点，不是 7）',
+    Math.abs(coverageOfNodes([rr('c', 0, 3), rr('c', 3, 5)], 10) - 0.6) < 1e-9,
+  );
+  check('乱序输入同样正确（不信任写入方有序性）', Math.abs(coverageOfNodes([rr('c', 3, 5), rr('c', 0, 2)], 10) - 0.6) < 1e-9);
+  check('超过全书节点数收敛到 1', coverageOfNodes([rr('c', 0, 11)], 10) === 1);
+  check('跨章求和正确（章 A 3 节点 + 章 B 2 节点 / 10）', Math.abs(coverageOfNodes([rr('a', 0, 2), rr('b', 0, 1)], 10) - 0.5) < 1e-9);
+}
+
 // ---------- 运行 ----------
 
 testResegment();
@@ -221,6 +240,7 @@ testPartialReading();
 testMigration();
 testCrossChapterPrecision();
 testKpEligibilityBasis();
+testCoverageOfNodes();
 
 console.log(`\n${passed} 项断言通过${failures.length > 0 ? `，${failures.length} 项失败` : '，全部通过 ✓'}`);
 if (failures.length > 0) {

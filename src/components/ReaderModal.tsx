@@ -15,6 +15,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/useStore';
 import { formatReadingMinutes } from '../lib/utils';
+import { coverageOfNodes } from '../lib/readState';
 import { sanitizeTitleQuotes } from '../lib/titleGen';
 
 export function ReaderModal() {
@@ -128,8 +129,8 @@ export function ReaderModal() {
   if (!unit || !book) return null;
 
   const readIds = progress[book.id]?.readUnitIds ?? [];
-  const bookUnits = units.filter((u) => u.bookId === book.id);
-  const coveragePct = Math.round((readIds.length / Math.max(1, bookUnits.length)) * 100);
+  // 口径统一（Canonical Source）：已读节点数 / 全书节点数，与切分无关
+  const coveragePct = Math.round(coverageOfNodes(progress[book.id]?.readRanges, book.nodeCount) * 100);
   const isFav = !!marks.favorites[unit.id];
   const fb = marks.unitFeedback[unit.id];
 

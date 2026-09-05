@@ -30,10 +30,9 @@ import { parseFile, parseTxtText } from '../lib/parsers';
 import { pickNext, topicKeyOf } from '../lib/recommender';
 import { extractKnowledgePointsForBook, buildExtractionWindows } from '../lib/knowledge';
 import {
-  buildRangesByChapter,
   coveredNodeCount,
+  coverageOfNodes,
   deriveReadUnitIds,
-  isUnitRead,
   mergeReadRanges,
   rangesFromUnits,
   subtractRanges,
@@ -812,24 +811,10 @@ export const useStore = create<StoreState>((set, get) => ({
 let kpGeneratingGuard = false;
 
 /**
- * 派生：某书阅读覆盖率 0~1，全部从 readRanges（事实层）推导。
- * - 有单元的书：已读区间完全覆盖的单元数 / 总单元数；
- * - 无单元书（「其他」类只进 Reader）：已读节点数 / 全书节点数近似。
+ * 派生：某书阅读覆盖率 0~1（呈现层便捷封装）。
+ * 权威口径在 readState.coverageOfNodes：已读节点数 / 全书节点数（book.nodeCount），
+ * 与 ReadingUnit 切分无关；「其他」类无单元书籍共用同一公式，无分支口径。
  */
-export function coverageOf(
-  book: Book,
-  units: ReadingUnit[],
-  progress: Record<string, ReadingProgress>,
-): number {
-  const p = progress[book.id];
-  const own = units.filter((u) => u.bookId === book.id);
-  if (own.length > 0) {
-    if (!p) return 0;
-    const byChapter = buildRangesByChapter(p.readRanges ?? []);
-    const readCount = own.filter((u) => isUnitRead(u, byChapter)).length;
-    return readCount / own.length;
-  }
-  const ranges = p?.readRanges ?? [];
-  if (ranges.length === 0 || !book.nodeCount) return 0;
-  return Math.min(1, coveredNodeCount(ranges) / book.nodeCount);
+export function coverageOf(book: Book, progress: Record<string, ReadingProgress>): number {
+  return coverageOfNodes(progress[book.id]?.readRanges, book.nodeCount);
 }

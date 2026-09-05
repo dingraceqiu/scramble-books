@@ -56,10 +56,10 @@
 
 | 层 | 命令 | 覆盖 | 状态 |
 |----|------|------|------|
-| Layer 1 纯逻辑 | `pnpm verify:readstate` | readRanges 合并/覆盖/迁移/推导数学模型 | 20/20 ✓ |
+| Layer 1 纯逻辑 | `pnpm verify:readstate` | readRanges 合并/覆盖/迁移/推导数学模型 + coverage 唯一口径数学 | 28/28 ✓ |
 | Layer 2 持久化集成 | `pnpm verify:persistence` | db.ts 全链路：建库→导入→阅读→reload→normalize→重切分→快照 round-trip→级联删除（'idb' 用内存 shim，业务代码全真） | 25/25 ✓ |
 | TD-03 契约 | `pnpm verify:quiz-leakage` | Quiz 全字段「只考已读」300 轮不变量 | 2709 项 ✓ |
-| TD-01 契约 | `pnpm verify:kp-invariance` | 分割不变性：切分全变而 KP 资格/出题范围不变；增量去重；无单元书籍可达 Quiz | 22 项 ✓ |
+| TD-01 契约 | `pnpm verify:kp-invariance` | 分割不变性：切分全变而 KP 资格/出题范围/Coverage 不变；增量去重；无单元书籍可达 Quiz | 28 项 ✓ |
 
 Layer 2 曾抓到真实缺陷：loadAll 对**未合并/乱序**的存量 readRanges 直接信任，`isRangeCovered` 的提前返回语义会导致已读被误判为未读——已在 `normalizeProgress` 强制 `mergeReadRanges`（持久化边界不信任写入方的有序性）。
 
