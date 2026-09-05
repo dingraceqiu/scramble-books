@@ -75,6 +75,32 @@
 - **登出**：询问「保留本地数据 / 清空本地数据」；清空走 `db.clearAllData` + 移除 readerPrefs 后刷新。
 - **离线/失败**：网络错误不阻塞本地操作（数据已 write-through 到 IndexedDB），面板提示失败并提供「重试同步」。
 
+## 工程流程规范（所有 Agent 必须遵守）
+
+**目标**：功能正确、不丢用户数据、可测试、可理解、可修改、可回滚、不依赖单次聊天上下文。把项目当作持续开发数年的真实软件维护，但工程复杂度必须与当前真实复杂度匹配——禁止为了形式上的 Clean Architecture / SOLID 制造没有现实价值的 interface / repository / adapter / factory / wrapper。
+
+### 复杂度原则
+
+任何新的 abstraction、架构层、framework、dependency、middleware、infrastructure，引入前必须回答「它现在解决了什么已经存在的问题？」。仅为「未来可能需要」的默认不引入；出现真实的重复、耦合、测试困难或替换需求后再抽象。优先选择满足当前需求的最简单清晰方案。
+
+### 项目阶段判定：当前为 Stage 2（Real Project）
+
+依据：已长期开发、有真实用户数据（本地 IndexedDB + 云端 SQLite）、多 Agent 交替开发、已有 CI（GitHub Pages 部署）、契约测试与架构文档。
+
+- **已具备**：Git、lint/format、契约测试、架构文档、.gitignore。
+- **应逐步补强**：pre-commit hooks、核心业务逻辑（segmenter / readState / sync）单测与回归测试、secret scanning、更严格 type check。
+- **暂不引入**（Stage 3 内容，除非出现真实需求）：E2E 全套、deployment pipeline、monitoring、backup、数据库 migration 体系。特别注意本项目同步模型是整库快照 last-write-wins，引入任何「迁移/备份」类机制前先确认现有快照模型确实不够用。
+
+### Git 约定
+
+Git 是事实来源：项目演化历史 + 回滚机制 + Agent 间协作记录。所有正式修改进入 Git，commit 保持单一逻辑变化，使用简化 Conventional Commits：
+
+```text
+feat: 新功能      fix: Bug 修复     refactor: 重构
+test: 测试        docs: 文档        chore: 工程维护
+perf: 性能优化
+```
+
 ## 包管理规范
 
 **仅允许使用 pnpm** 作为包管理器，**严禁使用 npm 或 yarn**。
