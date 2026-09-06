@@ -35,3 +35,14 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5000/   # 期望 200
 | 代码事实源 | github.com/dingraceqiu/scramble-books (main) | 最新 |
 | 生产服务器 | /home/ubuntu/apps/scramble-books | 部署时以 `git log --oneline -1` 核对 |
 | GitHub Pages | Actions 自动 | 跟随 main |
+
+## ⚠️ 服务器共享与协作规则（2026-09-07 事故留档）
+
+**这台服务器同时承载 FinReport Learner，且 `/scramble-books/` 的裸 IP 路由寄生在 finreport 的 nginx 配置文件里**（`/etc/nginx/sites-enabled/finreport.gracetools.club` 的「精确 IP 匹配块」，其优先级高于本项目的 default_server）。finreport 每次部署会用它自己的模板**整体重写**该文件，把我们的路由冲掉——2026-09-07 已因此发生过两次「同步失败 Network error」（API 404）。
+
+**已在源头修复**：4 份 finreport 部署模板（`~/Documents/{finreport-track-a,finreport-track-b,finreport-render2,Learn Fin Report}/scripts/deploy-tencent.sh`）均已内建「主页 + `/scramble-books/` 代理」两个 location，之后 finreport 再部署也不会冲掉。**新增第 5 份 finreport 工作副本时，必须同步打这个补丁**（幂等判断：模板里已有 `location ^~ /scramble-books/` 即跳过）。
+
+**排查特征**（再次出现「同步失败 Network error」时）：
+1. `curl http://129.204.30.165/scramble-books/api/auth/me` 返回 HTML/404 而非 `{"error":"未登录"}` → 路由被冲；
+2. 比对 `/etc/nginx/sites-enabled/finreport.gracetools.club` 是否含 `location ^~ /scramble-books/`；
+3. 重打补丁（见本机 `/tmp/patch-finq.py` 或任一已修模板）+ `nginx -t` + reload。
