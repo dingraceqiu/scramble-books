@@ -6,7 +6,7 @@
 
 - **入口**：`http://129.204.30.165/scramble-books/`（ICP 备案过渡期走裸 IP + 二级路径；备案通过后 `https://books.gracetools.club` 的根路径与 `/scramble-books/` 均已预埋可用）
 - **架构**：systemd 服务 `scramble-books.service` 跑 Express（`/home/ubuntu/apps/scramble-books`，`dist-server/server.js`），nginx 前置代理。**后端完整**：GLM AI（标题/分类/知识点）+ 云端账号/同步（SQLite，`/home/ubuntu/apps/data/cloud.db`）
-- **nginx 要点**：`/scramble-books/` 代理时**剥前缀**（`proxy_pass http://127.0.0.1:5000/;` 尾斜杠）——应用内静态资源与 API 均以根路径提供服务，前缀只存在于浏览器地址栏。该 location 必须保留 `client_max_body_size 70m;`。配置文件：`/etc/nginx/sites-enabled/{scramble-books,finreport.gracetools.club}`，改动前的原始版本有 `.bak` 备份
+- **nginx 要点**：`/scramble-books/` 代理时**剥前缀**（`proxy_pass http://127.0.0.1:5000/;` 尾斜杠）——应用内静态资源与 API 均以根路径提供服务。该项目的 IP 路由事实源是仓库内 `ops/nginx/ip-location.conf`，生产安装到 `/etc/nginx/project-locations/scramble-books.conf`；稳定网关 `/etc/nginx/sites-enabled/00-ip-gateway` 只负责 include，不由任何项目部署脚本重写。
 - **IP 根路径**是导航主页（`/var/www/index.html`，链接 Scramble Books 与 FinReport Learner）
 
 ### 更新部署（SSH 已在 Mac 配好，直接 `ssh 129.204.30.165`）
@@ -19,6 +19,14 @@ pnpm vite build --base=/scramble-books/   # ⚠️ 必须带 --base，裸 vite b
 pnpm tsup --config tsup.config.ts
 sudo systemctl restart scramble-books.service
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5000/   # 期望 200
+```
+
+只有 `ops/nginx/ip-location.conf` 变化时才更新本项目的 nginx fragment：
+
+```bash
+sudo install -d -m 755 /etc/nginx/project-locations
+sudo install -m 644 ops/nginx/ip-location.conf /etc/nginx/project-locations/scramble-books.conf
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ## GitHub Pages（备用）
@@ -40,7 +48,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5000/   # 期望 200
 
 - **现象**：裸 IP 入口 `http://129.204.30.165/scramble-books/` 登录后云同步显示「请求失败（413）」；当次旧诊断按 `JSON.stringify(...).length` 记录约 **3.98MB**（实为字符数口径）。2026-09-08 对生产库最新 V1 快照复核：4,035,822 JSON 字符、**7,699,662 UTF-8 bytes（7.34MiB）**；以后请求体与 60MiB 上限一律按 UTF-8 bytes 统计。
 - **根因**：客户端当时上传 V1 整库 JSON，`documents` 已含完整 Canonical Source，而 `units[].sourceText` 又重复一份原文；真正匹配裸 IP 的 nginx 精确 `server_name 129.204.30.165` 块没有足够的请求体上限，命中 nginx 默认约 1MB 限制，请求尚未到达 Express 的 70MB parser 和应用的 60MiB 快照校验。
-- **即时修复**：生产 `/etc/nginx/sites-enabled/finreport.gracetools.club` 的精确 IP 块中，`location ^~ /scramble-books/` 已设 `client_max_body_size 70m;`；`/etc/nginx/sites-enabled/scramble-books` 的域名及二级路径入口也设为 70m。2026-09-08 用 `nginx -T` 已确认三处生效。
+- **即时修复**：生产入口已设 `client_max_body_size 70m;`；随后迁移为独立的 `/etc/nginx/project-locations/scramble-books.conf`，不再寄生在 FinReport 配置中。域名配置仍由 `/etc/nginx/sites-enabled/scramble-books` 独立维护。
 - **架构修复**：新客户端写 Cloud Snapshot V2，只在逐字重建验证通过时省略 `sourceText / preview / headingText`；仍兼容 V1 拉取并在完整恢复本地后安全覆盖升级为 V2。应用层上限按 UTF-8 bytes 校验，不再用 JS 字符数近似。
 
 ### 413 防复发验证
@@ -55,18 +63,21 @@ curl -i http://129.204.30.165/scramble-books/api/auth/me   # 期望 JSON 401，�
 
 nginx 70m 是反向代理通行上限；Express parser 为 70mb，业务快照硬上限为 60MiB。不要把 nginx 值降到 60m：HTTP envelope 和单位差异需要余量。
 
-## ⚠️ 服务器共享与协作规则（2026-09-07 事故留档）
+## 服务器共享与协作规则（2026-09-07 事故留档，2026-09-08 已完成架构隔离）
 
-**这台服务器同时承载 FinReport Learner，且 `/scramble-books/` 的裸 IP 路由寄生在 finreport 的 nginx 配置文件里**（`/etc/nginx/sites-enabled/finreport.gracetools.club` 的「精确 IP 匹配块」，其优先级高于本项目的 default_server）。finreport 每次部署会用它自己的模板**整体重写**该文件，把我们的路由冲掉——2026-09-07 已因此发生过两次「同步失败 Network error」（API 404）。
+**历史根因**：`/scramble-books/` 曾寄生在 FinReport 的精确 IP `server` 块里，FinReport 部署整体重写该文件，2026-09-07 因此发生过两次 API 404，2026-09-08 又暴露过 413 上限漂移。
 
-**nginx 生成模板的事实源不在本仓库**，而在 finreport 各工作副本的 `scripts/deploy-tencent.sh`。2026-09-08 当前核对结果：
+**当前隔离模型**：
 
-- 已含 `/scramble-books/` location + `client_max_body_size 70m`：`~/Documents/{finreport-track-a,finreport-track-b,finreport-render2,Learn Fin Report}/scripts/deploy-tencent.sh`；
-- `~/Documents/finreport-wave1/scripts/deploy-tencent.sh` 当前仍缺该 location，**修复前禁止用这份脚本部署生产 nginx**；该副本属于 `dingraceqiu/finreport-learner` 的独立 `feat/wave1-render` 工作树，不在 scramble-books 仓库内，不能由本仓库提交代替修复。
+- host-owned：`/etc/nginx/sites-enabled/00-ip-gateway`，只定义精确 IP server 和 include；文件名以 `00-` 开头，确保即使旧 FinReport 脚本重新引入重复 IP server，旧块也因冲突被 nginx 忽略；
+- Scramble Books：仓库 `ops/nginx/ip-location.conf` → 服务器 `/etc/nginx/project-locations/scramble-books.conf`；
+- FinReport：其仓库 `scripts/nginx/ip-location.conf` → 服务器 `/etc/nginx/project-locations/finreport.conf`；
+- Insight：个人成长项目 `personal-growth-ip-location.nginx` → 服务器 `/etc/nginx/project-locations/insight.conf`；
+- IP 首页：host-owned `/etc/nginx/project-locations/00-home.conf`。
 
-以后新增或刷新任何 finreport 工作副本，部署前必须检查模板同时包含 `location ^~ /scramble-books/` 和同一 location 内的 `client_max_body_size 70m;`。只有 location 而没有 70m 仍会复发 413；只有 70m 而没有 location 会复发 404。
+任何项目部署只能安装自己的 fragment/domain 文件；禁止整体生成或复制别人的 location。现存旧 FinReport worktree 在同步 GitHub `main` 前仍含旧部署脚本，不应继续用于生产发布。
 
 **排查特征**（再次出现「同步失败 Network error」时）：
 1. `curl http://129.204.30.165/scramble-books/api/auth/me` 返回 HTML/404 而非 `{"error":"未登录"}` → 路由被冲；
-2. 比对 `/etc/nginx/sites-enabled/finreport.gracetools.club` 是否含 `location ^~ /scramble-books/`；
-3. 重打补丁（见本机 `/tmp/patch-finq.py` 或任一已修模板）+ `nginx -t` + reload。
+2. 比对 `/etc/nginx/project-locations/scramble-books.conf` 与仓库 `ops/nginx/ip-location.conf`；
+3. 只重新安装 Scramble Books fragment，执行 `nginx -t` 后 reload。
