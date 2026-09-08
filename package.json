@@ -16,7 +16,9 @@
     "verify:persistence": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-persistence.ts",
     "verify:quiz-leakage": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-quiz-leakage.ts",
     "verify:kp-invariance": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-kp-invariance.ts",
-    "verify": "pnpm verify:readstate && pnpm verify:persistence && pnpm verify:quiz-leakage && pnpm verify:kp-invariance",
+    "verify:cloud-snapshot": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-cloud-snapshot.ts",
+    "diagnose:snapshot": "tsx scripts/diagnose-cloud-snapshot.ts",
+    "verify": "pnpm verify:readstate && pnpm verify:persistence && pnpm verify:quiz-leakage && pnpm verify:kp-invariance && pnpm verify:cloud-snapshot",
     "invite": "node scripts/invite.mjs"
   },
   "dependencies": {

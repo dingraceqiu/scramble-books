@@ -8,9 +8,14 @@
  * 数据快照直接取自 IndexedDB（store 全部 write-through，它是事实来源），
  * 阅读偏好取自 localStorage 的 zustand persist 键。
  */
-import type { CloudSnapshot } from '../types';
+import type { CloudReaderPrefs, CloudSnapshotV1, CloudSnapshotV2 } from '../types';
 import * as db from './db';
 import * as api from './cloudApi';
+import {
+  deserializeCloudSnapshot,
+  serializeCloudSnapshot,
+  snapshotSizeDiagnostics,
+} from './cloudSnapshot';
 import { useAuth } from '../store/useAuth';
 import { useStore } from '../store/useStore';
 import { useReaderPrefs } from '../store/useReaderPrefs';
@@ -18,24 +23,24 @@ import i18n from '../i18n';
 
 const READER_PREFS_KEY = 'scrollbook-reader-prefs';
 
-function readReaderPrefs(): CloudSnapshot['readerPrefs'] {
+function readReaderPrefs(): CloudReaderPrefs {
   try {
     const raw = localStorage.getItem(READER_PREFS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as { state?: unknown };
     const state = (parsed && typeof parsed === 'object' && 'state' in parsed
-      ? (parsed as { state: CloudSnapshot['readerPrefs'] }).state
-      : parsed) as CloudSnapshot['readerPrefs'] | undefined;
+      ? (parsed as { state: CloudReaderPrefs }).state
+      : parsed) as CloudReaderPrefs | undefined;
     return state ?? {};
   } catch {
     return {};
   }
 }
 
-export async function buildSnapshot(): Promise<CloudSnapshot> {
+export async function buildSnapshot(): Promise<CloudSnapshotV2> {
   const data = await db.loadAll();
   const documents = await db.getAllDocuments();
-  return {
+  const complete: CloudSnapshotV1 = {
     version: 1,
     books: data.books,
     documents,
@@ -48,6 +53,11 @@ export async function buildSnapshot(): Promise<CloudSnapshot> {
     quizAttempts: data.quizAttempts,
     readerPrefs: readReaderPrefs(),
   };
+  const wire = serializeCloudSnapshot(complete);
+  if (import.meta.env.DEV) {
+    console.info('[sync] snapshot-size', snapshotSizeDiagnostics(wire, complete));
+  }
+  return wire;
 }
 
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -115,24 +125,36 @@ export async function pullCloudData(): Promise<'replaced' | 'uploaded' | 'empty'
   try {
     const { data } = await api.pullSync(token);
     if (data && Array.isArray(data.books)) {
+      const restored = deserializeCloudSnapshot(data);
+      let migrationError: Error | null = null;
       pushGate = true;
       try {
         await db.replaceAllData({
-          books: data.books,
-          documents: Array.isArray(data.documents) ? data.documents : [],
-          units: Array.isArray(data.units) ? data.units : [],
-          progress: data.progress && typeof data.progress === 'object' ? data.progress : {},
-          highlights: Array.isArray(data.highlights) ? data.highlights : [],
-          notes: Array.isArray(data.notes) ? data.notes : [],
-          marks: data.marks ?? db.DEFAULT_MARKS,
-          knowledgePoints: Array.isArray(data.knowledgePoints) ? data.knowledgePoints : [],
-          quizAttempts: Array.isArray(data.quizAttempts) ? data.quizAttempts : [],
+          books: restored.books,
+          documents: Array.isArray(restored.documents) ? restored.documents : [],
+          units: Array.isArray(restored.units) ? restored.units : [],
+          progress: restored.progress && typeof restored.progress === 'object' ? restored.progress : {},
+          highlights: Array.isArray(restored.highlights) ? restored.highlights : [],
+          notes: Array.isArray(restored.notes) ? restored.notes : [],
+          marks: restored.marks ?? db.DEFAULT_MARKS,
+          knowledgePoints: Array.isArray(restored.knowledgePoints) ? restored.knowledgePoints : [],
+          quizAttempts: Array.isArray(restored.quizAttempts) ? restored.quizAttempts : [],
         });
-        writeReaderPrefs(data.readerPrefs);
+        writeReaderPrefs(restored.readerPrefs);
+        // V1 数据先完整恢复到本地，再用同一份内存数据原子覆盖为 V2；绝不先清空云端。
+        if (data.version === 1) {
+          try {
+            await api.pushSync(token, serializeCloudSnapshot(restored));
+          } catch (error) {
+            migrationError = error instanceof Error ? error : new Error(String(error));
+            console.warn('[sync] V1 restored but V2 cloud migration will retry on next push:', error);
+          }
+        }
       } finally {
         pushGate = false;
       }
-      setSyncStatus('ok');
+      if (migrationError) setSyncStatus('error', migrationError.message);
+      else setSyncStatus('ok');
       return 'replaced';
     }
     // 云端为空：迁移本地数据上云
@@ -146,7 +168,7 @@ export async function pullCloudData(): Promise<'replaced' | 'uploaded' | 'empty'
   }
 }
 
-function writeReaderPrefs(prefs: CloudSnapshot['readerPrefs'] | null | undefined): void {
+function writeReaderPrefs(prefs: CloudReaderPrefs | null | undefined): void {
   try {
     if (!prefs || typeof prefs !== 'object') return;
     const hasContent =
@@ -188,21 +210,35 @@ export function startSyncSubscriptions(): void {
   if (started) return;
   started = true;
 
-  // 业务数据：只关心数据字段，忽略 view/search 等纯 UI 状态
-  let prev: string | null = null;
+  // 业务数据：按不可变引用判断真实业务字段变化；避免只比较数组长度而漏掉阅读进度、
+  // 笔记内容、AI 标题、KP/Quiz attempt 等“数量不变但内容变化”的同步。
+  let prev: {
+    books: unknown;
+    units: unknown;
+    progress: unknown;
+    highlights: unknown;
+    notes: unknown;
+    marks: unknown;
+    knowledgePoints: unknown;
+    quizAttempts: unknown;
+  } | null = null;
   useStore.subscribe((state) => {
     if (useAuth.getState().mode !== 'cloud' || pushGate) return;
-    const sizes: unknown[] = [
-      state.books.length,
-      state.units.length,
-      Object.keys(state.progress).length,
-      state.highlights.length,
-      state.notes.length,
-      Object.keys(state.marks.favorites ?? {}).length,
-    ];
-    const sig = sizes.join('|');
-    if (sig === prev) return;
-    prev = sig;
+    const next = {
+      books: state.books,
+      units: state.units,
+      progress: state.progress,
+      highlights: state.highlights,
+      notes: state.notes,
+      marks: state.marks,
+      knowledgePoints: state.knowledgePoints,
+      quizAttempts: state.quizAttempts,
+    };
+    if (prev && Object.keys(next).every((key) => {
+      const field = key as keyof typeof next;
+      return next[field] === prev?.[field];
+    })) return;
+    prev = next;
     schedulePush();
   });
 

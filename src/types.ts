@@ -280,12 +280,18 @@ export interface ReaderPosition {
 
 // ---------- 云端同步 ----------
 
+export interface CloudReaderPrefs {
+  settings?: unknown;
+  bookmarks?: unknown;
+  positions?: unknown;
+  highlightColor?: unknown;
+}
+
 /**
- * 用户整库快照：登录模式下本地数据与服务器之间以此结构双向同步。
- * documents 为书籍原文（Canonical Source Map），其余字段与 IndexedDB 各 store 对应；
- * readerPrefs 对应 localStorage 中 scrollbook-reader-prefs 的持久化部分。
+ * V1 云端整库快照：与本地 IndexedDB 基本同构。
+ * ReadingUnit.sourceText / preview 等派生字段会和 documents 中的 Canonical Source 重复。
  */
-export interface CloudSnapshot {
+export interface CloudSnapshotV1 {
   version: 1;
   books: Book[];
   documents: SourceDocument[];
@@ -297,13 +303,39 @@ export interface CloudSnapshot {
   /** 学习层数据（可选：旧客户端会忽略未知字段） */
   knowledgePoints?: KnowledgePoint[];
   quizAttempts?: QuizAttempt[];
-  readerPrefs: {
-    settings?: unknown;
-    bookmarks?: unknown;
-    positions?: unknown;
-    highlightColor?: unknown;
-  };
+  readerPrefs: CloudReaderPrefs;
 }
+
+/**
+ * V2 wire-only ReadingUnit。
+ * sourceText / preview / headingText 只有在无法由 documents + SourceRange 逐字重建时才携带 override；
+ * null headingText 表示本地原值确实缺失，避免反序列化时误补章节标题。
+ * coreSentence / titleSupport / ai 必须保留：它们记录生成当时的证据和结果，不能跨生成器版本重算。
+ */
+export interface CloudReadingUnitV2
+  extends Omit<ReadingUnit, 'sourceText' | 'preview' | 'headingText'> {
+  sourceText?: string;
+  preview?: string;
+  headingText?: string | null;
+}
+
+/** Cloud Snapshot V2 只改变 wire/storage format；本地 IndexedDB 仍写入完整 ReadingUnit。 */
+export interface CloudSnapshotV2 {
+  version: 2;
+  books: Book[];
+  documents: SourceDocument[];
+  units: CloudReadingUnitV2[];
+  progress: Record<string, ReadingProgress>;
+  highlights: Highlight[];
+  notes: Note[];
+  marks: Marks;
+  knowledgePoints?: KnowledgePoint[];
+  quizAttempts?: QuizAttempt[];
+  readerPrefs: CloudReaderPrefs;
+}
+
+/** API 可读取 V1 或 V2；新客户端只写 V2。 */
+export type CloudSnapshot = CloudSnapshotV1 | CloudSnapshotV2;
 
 // ---------- Learning Foundation（学习层） ----------
 

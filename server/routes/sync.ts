@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import * as db from '../lib/cloudDb';
 import { requireAuth, type AuthedRequest } from './auth';
-import type { CloudSnapshot } from '../../src/types';
+import type { CloudSnapshot, CloudSnapshotV2 } from '../../src/types';
 
 /**
  * 云端数据同步（整库快照，MVP）：
@@ -20,6 +20,7 @@ function isSnapshot(v: unknown): v is CloudSnapshot {
   if (!v || typeof v !== 'object') return false;
   const s = v as Partial<CloudSnapshot>;
   return (
+    (s.version === 1 || s.version === 2) &&
     Array.isArray(s.books) &&
     Array.isArray(s.documents) &&
     Array.isArray(s.units) &&
@@ -61,7 +62,8 @@ syncRouter.put('/sync', requireAuth, (req: AuthedRequest, res) => {
     return;
   }
   const json = JSON.stringify(snapshot.data);
-  if (json.length > SNAPSHOT_MAX_BYTES) {
+  const bytes = Buffer.byteLength(json, 'utf8');
+  if (bytes > SNAPSHOT_MAX_BYTES) {
     res.status(413).json({ error: '数据超出 60MB 上限' });
     return;
   }
@@ -80,7 +82,7 @@ syncRouter.delete('/sync', requireAuth, (req: AuthedRequest, res) => {
     return;
   }
   db.putUserData(req.user.id, JSON.stringify({
-    version: 1,
+    version: 2,
     books: [],
     documents: [],
     units: [],
@@ -89,6 +91,6 @@ syncRouter.delete('/sync', requireAuth, (req: AuthedRequest, res) => {
     notes: [],
     marks: { favorites: {}, unitFeedback: {}, bookScore: {}, topicScore: {} },
     readerPrefs: {},
-  } satisfies CloudSnapshot));
+  } satisfies CloudSnapshotV2));
   res.json({ ok: true });
 });
