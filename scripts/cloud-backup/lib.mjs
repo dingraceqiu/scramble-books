@@ -22,16 +22,29 @@ export function isManagedBackupName(name) {
 
 /**
  * 从文件名解析 UTC 时间（Date 或 null）。只信文件名，不信 mtime。
+ *
+ * 必须回读校验：Date 构造会对越界字段静默进位（20260931 → 10 月 1 日、
+ * 非闰年 20260229 → 3 月 1 日、24:61:00 → 次日），因此解析后重新格式化，
+ * 与文件名中的原始年月日时分秒逐字一致才算合法。
  */
 export function parseBackupTimestamp(name) {
   const m = MANAGED_NAME_RE.exec(name);
   if (!m) return null;
-  const iso = `${m[1]}T${m[2]}Z`.replace(
-    /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/,
-    '$1-$2-$3T$4:$5:$6Z',
-  );
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? null : d;
+  const datePart = m[1];
+  const timePart = m[2];
+  const year = Number(datePart.slice(0, 4));
+  const month = Number(datePart.slice(4, 6));
+  const day = Number(datePart.slice(6, 8));
+  const hour = Number(timePart.slice(0, 2));
+  const minute = Number(timePart.slice(2, 4));
+  const second = Number(timePart.slice(4, 6));
+  const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (Number.isNaN(d.getTime())) return null;
+  const pad = (n, w) => String(n).padStart(w, '0');
+  const rebuilt =
+    `${pad(d.getUTCFullYear(), 4)}${pad(d.getUTCMonth() + 1, 2)}${pad(d.getUTCDate(), 2)}` +
+    `T${pad(d.getUTCHours(), 2)}${pad(d.getUTCMinutes(), 2)}${pad(d.getUTCSeconds(), 2)}`;
+  return rebuilt === `${datePart}T${timePart}` ? d : null;
 }
 
 /** 生成备份主体文件名（UTC 时间戳）。 */

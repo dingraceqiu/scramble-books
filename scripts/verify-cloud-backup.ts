@@ -58,6 +58,16 @@ check('时间戳非法的名字不匹配', !isManagedBackupName('scramble-books-
 const parsed = parseBackupTimestamp('scramble-books-cloud-20260913T043000Z.db');
 check('时间戳解析为 UTC', parsed !== null && parsed.toISOString() === '2026-09-13T04:30:00.000Z');
 check('非法时间戳返回 null', parseBackupTimestamp('scramble-books-cloud-20260999T999999Z.db') === null);
+// 日期进位必须被拒绝（Date 构造会静默滚到下一天/下个月）
+check('9 月 31 日被拒绝', parseBackupTimestamp('scramble-books-cloud-20260931T120000Z.db') === null);
+check('非闰年 2 月 29 日被拒绝', parseBackupTimestamp('scramble-books-cloud-20260229T120000Z.db') === null);
+check('闰年 2 月 29 日合法', parseBackupTimestamp('scramble-books-cloud-20240229T120000Z.db') !== null);
+check('13 月被拒绝', parseBackupTimestamp('scramble-books-cloud-20261301T120000Z.db') === null);
+check('0 月被拒绝', parseBackupTimestamp('scramble-books-cloud-20260001T120000Z.db') === null);
+check('24 时被拒绝（进位到次日）', parseBackupTimestamp('scramble-books-cloud-20260913T246000Z.db') === null);
+check('61 分被拒绝（进位到下一时）', parseBackupTimestamp('scramble-books-cloud-20260913T256100Z.db') === null);
+check('60 秒被拒绝（进位到下一分）', parseBackupTimestamp('scramble-books-cloud-20260913T235960Z.db') === null);
+check('边界 23:59:59 合法', parseBackupTimestamp('scramble-books-cloud-20260913T235959Z.db') !== null);
 const generated = backupNameFor(new Date(Date.UTC(2026, 8, 13, 4, 30, 5)));
 check(
   'backupNameFor 生成可回读的名字',
@@ -180,6 +190,9 @@ async function runE2E(): Promise<void> {
 
   const srcShaBefore = crypto.createHash('sha256').update(fs.readFileSync(srcDb)).digest('hex');
 
+  // 目录预置为宽松权限，验证 CLI 会强制收紧到 0700
+  fs.chmodSync(backupDir, 0o755);
+
   // 布置「应被保护」的文件：旧手动备份、其他项目文件
   const manualBak = path.join(srcDir, '..', 'manual-bak');
   fs.mkdirSync(manualBak);
@@ -212,6 +225,25 @@ async function runE2E(): Promise<void> {
 
   const list = run('list');
   check('list 退出码 0 且包含 SHA', list.status === 0 && list.stdout.includes(actualSha));
+
+  // 权限：目录 0700、.db 0600、manifest 0600（预置 755 的目录也被收紧）
+  check('备份目录权限为 0700', (fs.statSync(backupDir).mode & 0o777) === 0o700);
+  check('备份 .db 权限为 0600', (fs.statSync(path.join(backupDir, backupName)).mode & 0o777) === 0o600);
+  check(
+    'manifest 权限为 0600',
+    (fs.statSync(path.join(backupDir, `${backupName}.json`)).mode & 0o777) === 0o600,
+  );
+
+  // 相对路径拒绝（resolve 前判断，db 与备份目录都覆盖）
+  const beforeRel = fs.readdirSync(backupDir).sort().join('|');
+  const relDb = run('backup', ['--db', 'src/cloud.db']);
+  check('相对路径源库被拒绝', relDb.status === 1 && relDb.stderr.includes('相对路径'));
+  const relOut = run('backup', ['--out', 'rel-backups']);
+  check('相对路径备份目录被拒绝', relOut.status === 1 && relOut.stderr.includes('相对路径'));
+  check(
+    '相对路径拒绝不产生任何文件',
+    fs.readdirSync(backupDir).sort().join('|') === beforeRel && !fs.existsSync(path.join(root, 'rel-backups')),
+  );
 
   const drill = run('drill');
   check(

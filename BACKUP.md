@@ -119,7 +119,9 @@ node scripts/cloud-backup/cloud-backup.mjs drill --file scramble-books-cloud-202
 ## 权限要求
 
 - 备份以 `ubuntu` 用户跑（`CLOUD_DB_PATH` 同属 `ubuntu`）；
-- 安装/启停 unit 需要 `sudo`；备份目录归 `ubuntu`，请勿手工 chmod 放宽；
+- **备份目录 0700、备份文件与 manifest 0600**：systemd 单元设 `UMask=0077`，
+  CLI 也会显式 `chmod`（手动运行同样收紧，预置宽松权限的目录会被强制改回 0700）；
+- 安装/启停 unit 需要 `sudo`；请勿手工 chmod 放宽备份目录或文件权限；
 - 旧手动备份 `cloud.db.bak-20260908-pre-v2` 属 `root:root`，**只增不删**。
 
 ## 测试

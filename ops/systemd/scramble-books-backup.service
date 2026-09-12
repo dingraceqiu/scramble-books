@@ -31,13 +31,15 @@ Environment=CLOUD_BACKUP_KEEP_WEEKLY=4
 
 # 资源与安全边界：
 # - 整个文件系统只读，仅备份目录可写（源库因此天然不可写）；
-# - 独立 /tmp、禁止提权；日志只进 journald。
+# - 独立 /tmp、禁止提权；UMask=0077 保证备份目录/文件为 0700/0600；
+# - 日志只进 journald。
 Nice=10
 MemoryMax=512M
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/home/ubuntu/apps/data/scramble-books-backups
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

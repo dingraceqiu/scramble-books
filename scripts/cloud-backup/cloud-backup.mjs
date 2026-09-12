@@ -68,9 +68,12 @@ function resolveBackupDir(args) {
   if (!dir || typeof dir !== 'string') {
     fail('缺少备份目录：用 --out 或环境变量 CLOUD_BACKUP_DIR 指定');
   }
+  // 先拒绝相对路径，再 resolve：避免「resolve 之后永远绝对」的无效判断
+  if (!path.isAbsolute(dir)) fail(`备份目录必须是绝对路径（收到相对路径）：${dir}`);
   const resolved = path.resolve(dir);
-  if (!path.isAbsolute(resolved)) fail('备份目录必须是绝对路径');
-  fs.mkdirSync(resolved, { recursive: true });
+  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  // 目录权限强制 0700（已存在的目录也收紧）
+  fs.chmodSync(resolved, 0o700);
   return resolved;
 }
 
@@ -79,6 +82,7 @@ function resolveDbPath(args) {
   if (!dbPath || typeof dbPath !== 'string') {
     fail('缺少源库路径：用 --db 或环境变量 CLOUD_DB_PATH 指定');
   }
+  if (!path.isAbsolute(dbPath)) fail(`源库路径必须是绝对路径（收到相对路径）：${dbPath}`);
   const resolved = path.resolve(dbPath);
   if (!fs.existsSync(resolved)) fail(`源库不存在：${resolved}`);
   return resolved;
@@ -99,8 +103,8 @@ function quoteSqlString(p) {
 }
 
 function openReadOnly(dbPath) {
-  // file: URI + mode=ro：从语义上禁止任何写路径
-  return new DatabaseSync(`file:${dbPath.split('?')[0]}?mode=ro`);
+  // readOnly 选项从 API 层禁止任何写路径（同时保留，不依赖单一机制）
+  return new DatabaseSync(dbPath, { readOnly: true });
 }
 
 function countRows(db) {
@@ -184,6 +188,8 @@ async function cmdBackup(args) {
     }
 
     const size = fs.statSync(tmpPath).size;
+    // 备份文件权限强制 0600（rename 前收紧，最终文件一出现就是安全权限）
+    fs.chmodSync(tmpPath, 0o600);
     const sha256 = await sha256File(tmpPath);
 
     // 4. 原子改名
@@ -211,7 +217,8 @@ async function cmdBackup(args) {
     };
     try {
       const manifestTmp = path.join(backupDir, `.tmp-${finalName}.json`);
-      fs.writeFileSync(manifestTmp, JSON.stringify(manifest, null, 2) + '\n');
+      fs.writeFileSync(manifestTmp, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 });
+      fs.chmodSync(manifestTmp, 0o600);
       fs.renameSync(manifestTmp, path.join(backupDir, `${finalName}.json`));
     } catch (e) {
       console.error(`[cloud-backup] WARN: manifest 写入失败（备份本体有效）：${e.message}`);
