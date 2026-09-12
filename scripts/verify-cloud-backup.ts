@@ -271,6 +271,10 @@ async function runE2E(): Promise<void> {
   fs.writeFileSync(path.join(backupDir, 'keepme.txt'), 'other-project');
   const b2 = run('backup');
   check('第二次 backup 退出码 0', b2.status === 0);
+  check(
+    '清理同日旧备份无路径校验误报',
+    !b2.stderr.includes('路径校验未通过'),
+  );
   const b2Name = /scramble-books-cloud-\d{8}T\d{6}Z\.db/.exec(b2.stdout)?.[0] ?? '';
   const after = fs.readdirSync(backupDir);
   const remainingDb = after.filter((n) => isManagedBackupName(n) && n.endsWith('.db'));
