@@ -17,8 +17,9 @@
     "verify:quiz-leakage": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-quiz-leakage.ts",
     "verify:kp-invariance": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-kp-invariance.ts",
     "verify:cloud-snapshot": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-cloud-snapshot.ts",
+    "verify:cloud-backup": "tsx scripts/verify-cloud-backup.ts",
     "diagnose:snapshot": "tsx scripts/diagnose-cloud-snapshot.ts",
-    "verify": "pnpm verify:readstate && pnpm verify:persistence && pnpm verify:quiz-leakage && pnpm verify:kp-invariance && pnpm verify:cloud-snapshot",
+    "verify": "pnpm verify:readstate && pnpm verify:persistence && pnpm verify:quiz-leakage && pnpm verify:kp-invariance && pnpm verify:cloud-snapshot && pnpm verify:cloud-backup",
     "invite": "node scripts/invite.mjs"
   },
   "dependencies": {
