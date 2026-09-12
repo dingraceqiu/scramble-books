@@ -20,7 +20,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Typecheck
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
       - name: Lint
         run: pnpm lint:build
       # 数据不变性回归：阅读状态 / 持久化 / Quiz 泄露 / KP 不变性 / Cloud Snapshot V1↔V2
