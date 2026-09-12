@@ -29,6 +29,23 @@ sudo install -m 644 ops/nginx/ip-location.conf /etc/nginx/project-locations/scra
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+## 云端数据库备份（自动，每日）
+
+生产库 `/home/ubuntu/apps/data/cloud.db`（WAL 模式）由本仓库独立维护的
+systemd timer 每日 04:30 自动备份到 `/home/ubuntu/apps/data/scramble-books-backups/`。
+**WAL 模式下禁止用 `cp cloud.db` 备份**（会丢未 checkpoint 的 WAL 数据）；
+备份用只读连接 + SQLite `VACUUM INTO` 一致快照，含 integrity_check、SHA-256
+manifest 与原子改名，保留最近 7 个每日 + 4 个每周备份。
+
+常用命令与失败排查见 **[BACKUP.md](./BACKUP.md)**（含恢复演练与人工灾难恢复步骤）：
+
+```bash
+systemctl list-timers scramble-books-backup.timer --no-pager   # timer 状态
+sudo systemctl start scramble-books-backup.service             # 手动触发一次
+node scripts/cloud-backup/cloud-backup.mjs list                # 列出备份
+node scripts/cloud-backup/cloud-backup.mjs drill               # 恢复演练（不碰生产库）
+```
+
 ## GitHub Pages（备用）
 
 - **入口**：https://dingraceqiu.github.io/scramble-books/
