@@ -217,6 +217,7 @@ async function glmClassify(
   req: ClassifyRequest,
   description: string | undefined,
   evidence: string[],
+  extraInstruction?: string,
 ): Promise<OnlineBookType | null> {
   if (!glmAvailable()) return null;
   const typeGuide =
@@ -236,7 +237,11 @@ async function glmClassify(
           content:
             '你是图书分类专家。根据书名、作者和资料判断这本书属于哪个类型。' +
             `候选类型（格式 类型=含义）：${typeGuide}。` +
-            '宁可判 other 也不要把叙事散文/随笔集误判为小说。只输出 JSON：{"bookType":"...","reason":"一句话依据"}',
+            '关键区分：fiction 只给虚构叙事（情节和人物是作者创作/虚构的）；' +
+            '用故事化笔法讲真实人物或真实历史事件的书是 biography 或 history；' +
+            '叙事散文/随笔集既不是小说也不是传记，判 other 或按主题归类。' +
+            (extraInstruction ? extraInstruction + ' ' : '') +
+            '只输出 JSON：{"bookType":"...","reason":"一句话依据"}',
         },
         { role: 'user', content: lines.join('\n') },
       ],
@@ -357,5 +362,22 @@ export async function classifyBook(
     return { bookType: null, source: 'none', evidence, coverUrl, description };
   }
   evidence.push(`最终投票：${topType}（${topScore} 分，领先 ${topScore - secondScore}）`);
+
+  // 4) 虚构/非虚构边界复核：规则正则区分不了「叙事型非虚构」与小说、也压不住
+  //    「小说」二字在书评里的泛指用法。凡是规则判为小说、或小说票数可观但没赢的，
+  //    都交 GLM 用书名+作者+资料复核一遍；GLM 给出不同的有效类型则采信 GLM。
+  const fictionVotes = votes.get('fiction') ?? 0;
+  if (topType === 'fiction' || fictionVotes >= 3) {
+    const hint =
+      topType === 'fiction'
+        ? `规则判为小说（${topScore} 分）。请特别确认：它是虚构叙事，还是用故事笔法写真实人物/事件的传记或历史著作？若非虚构请给出正确类型。`
+        : `规则判为 ${topType}，但存在小说信号（${fictionVotes} 分）。请确认它到底是虚构小说还是非虚构作品，给出正确类型。`;
+    const glmType = await glmClassify(req, description, evidence, hint);
+    if (glmType && glmType !== topType) {
+      evidence.push(`GLM 复核改判：${topType} → ${glmType}`);
+      return { bookType: glmType, source: 'online', evidence, coverUrl, description };
+    }
+    if (glmType) evidence.push(`GLM 复核维持：${glmType}`);
+  }
   return { bookType: topType, source: 'online', evidence, coverUrl, description };
 }

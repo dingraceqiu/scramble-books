@@ -2,8 +2,6 @@
  * 推荐系统（v2：行为信号版）
  *
  * 基于以下信号给非小说单元打分（小说走严格顺序追更，不参与打分）：
- * - 显式反馈：单元级「多推荐/少推荐」，聚合到书籍分与主题分
- * - 收藏：单元级收藏加分；书级收藏越多，整本书加权越高（喜欢得多）
  * - 阅读活跃：本书已读篇数越多加权越高；最近 3/7 天刷过额外加权（浏览得多、追更）
  * - 类型亲和：最近 14 天读过的书按类型累计加分，同类内容更靠前，随时间自然冷却
  * - 新鲜度：确定性伪随机扰动（随「换一批」种子变化），保证探索性又不让顺序乱跳
@@ -38,8 +36,6 @@ const DAY_MS = 86_400_000;
  * 推荐信号上下文：一次 recommend() 调用里按书预计算，避免逐单元重复扫描。
  */
 interface ScoreContext {
-  /** 本书被收藏的笔记数 */
-  favoriteCount: number;
   /** 本书已读篇数 */
   readCount: number;
   /** 距离本书最近一次阅读的天数（从未读过为 null） */
@@ -81,24 +77,14 @@ function unitNoise(seed: number, id: string): number {
 export function scoreUnit(
   u: ReadingUnit,
   read: Set<string>,
-  marks: Marks,
+  _marks: Marks,
   seed = 0,
-  ctx: ScoreContext = { favoriteCount: 0, readCount: 0, lastActiveAgeDays: null, typeAffinity: new Map() },
+  ctx: ScoreContext = { readCount: 0, lastActiveAgeDays: null, typeAffinity: new Map() },
 ): number {
   let s = unitNoise(seed, u.id) * 2; // 新鲜度扰动（确定性：随 seed 变化，不随重算变化）
   if (read.has(u.id)) s -= 30;
-  if (marks.favorites[u.id]) s += 4;
-  const fb = marks.unitFeedback[u.id];
-  if (fb === 1) s += 3;
-  if (fb === -1) s -= 8;
-  // 书籍级偏好
-  s += (marks.bookScore[u.bookId] || 0) * 2.5;
-  // 主题（章节）级偏好
-  s += (marks.topicScore[topicKeyOf(u)] || 0) * 2;
-
-  // —— 行为信号（v2）——
-  // 喜欢得多：本书被收藏的笔记越多，书级热度越高（上限 +6）
-  s += Math.min(ctx.favoriteCount, 5) * 1.2;
+  // 点赞/收藏与「多推荐/少推荐」不再影响排序（用户反馈该规则体验差，已停用）
+  // —— 行为信号 ——
   // 浏览得多：本书已读篇数越多越可能继续读（上限 +3）
   s += Math.min(ctx.readCount, 12) * 0.25;
   // 最近活跃：3 天内刷过这本书 +2，7 天内 +1（追更驱动力）
@@ -197,12 +183,6 @@ export function recommend(allUnits: ReadingUnit[], opts: RecommendOptions): Read
     unitById.set(u.id, u);
     if (!bookTypeById.has(u.bookId)) bookTypeById.set(u.bookId, bookTypeOf(u));
   }
-  const favoriteCountByBook = new Map<string, number>();
-  for (const [unitId, on] of Object.entries(opts.marks.favorites)) {
-    if (!on) continue;
-    const bookId = unitById.get(unitId)?.bookId;
-    if (bookId) favoriteCountByBook.set(bookId, (favoriteCountByBook.get(bookId) ?? 0) + 1);
-  }
   const readCountByBook = new Map<string, number>();
   const lastActiveByBook = new Map<string, number>();
   for (const p of Object.values(opts.progress ?? {})) {
@@ -213,7 +193,6 @@ export function recommend(allUnits: ReadingUnit[], opts: RecommendOptions): Read
   const ctxFor = (u: ReadingUnit): ScoreContext => {
     const lastActive = lastActiveByBook.get(u.bookId);
     return {
-      favoriteCount: favoriteCountByBook.get(u.bookId) ?? 0,
       readCount: readCountByBook.get(u.bookId) ?? 0,
       lastActiveAgeDays: lastActive ? (now - lastActive) / DAY_MS : null,
       typeAffinity,

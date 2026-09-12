@@ -28,7 +28,13 @@ const SOFT_CHARS = 1800;
 const HARD_PARAS = 22;
 const HARD_CHARS = 3800;
 /** 收束单元的最小篇幅：至少这么多段才允许「见到核心句就收」 */
-const MIN_PARAS_EARLY_CLOSE = 4;
+const MIN_PARAS_EARLY_CLOSE = 8;
+/**
+ * 下一段以转折/递进/列举开头 → 当前论点大概率已经讲完、下一段开启新论点。
+ * 提前收束必须同时满足该信号，避免论证还在展开就被句末标点截断。
+ */
+const TRANSITION_START =
+  /^(然而|但是|但|不过|与此同时|与此相对|另一方面|此外|另外|其次|再者|同时|首先|更重要的是|更重要的是[，,]|第[一二三四五六七八九十]+[，、.．]|[0-9]{1,2}[、.．]\s*|[（(][一二三四五六七八九十0-9]+[)）])/;
 /** 达到软阈值后若还没出现明确核心句，最多再多取这么多段去补一个论点 */
 const EXTEND_TOLERANCE_PARAS = 4;
 /** 达到该长度的段落视为「论述充分」，可作为软边界 */
@@ -73,18 +79,26 @@ function isBoundaryAfter(
   if (reachedHard) {
     return true; // 硬上限强制收束，避免无限膨胀
   }
-  // 软阈值之前：已经有明确核心句 + 段落不再过于零碎 -> 论点完整，提前收束
+  const naturalEnd = CLOSING_PUNCT.test(cur.text);
+  const nextStartsNewPoint = TRANSITION_START.test(next.text.trim());
+  // 软阈值之前：必须「核心句明确 + 句末收束 + 下一段明确开启新论点」才提前收束；
+  // 只看句末标点几乎必然命中（中文段落都以句号结尾），会把展开中的论证拦腰截断
   if (!reachedSoft) {
-    return paraCount >= MIN_PARAS_EARLY_CLOSE && hasStrongCore && CLOSING_PUNCT.test(cur.text);
+    return paraCount >= MIN_PARAS_EARLY_CLOSE && hasStrongCore && naturalEnd && nextStartsNewPoint;
   }
-  // 达到软阈值：没有明确核心句时容忍多取几段补一个论点（受硬上限兜底）
+  // 达到软阈值：没有明确核心句时容忍多取几段补一个论点（受硬上限兜底），
+  // 且优先在长论述段或下一段开新论点处收束
   if (!hasStrongCore) {
-    return paraCount >= SOFT_PARAS + EXTEND_TOLERANCE_PARAS && CLOSING_PUNCT.test(cur.text);
+    return (
+      paraCount >= SOFT_PARAS + EXTEND_TOLERANCE_PARAS &&
+      naturalEnd &&
+      (nextStartsNewPoint || (cur.type === 'para' && cur.text.length >= LONG_PARA))
+    );
   }
-  // 已有明确核心句 + 软阈值之上：在自然断点收束
+  // 已有明确核心句 + 软阈值之上：在自然断点收束（新论点起始优先，其次长论述段）
   if (cur.type === 'list' && next.type !== 'list') return true;
   if (cur.type === 'para' && cur.text.length >= LONG_PARA) return true;
-  return CLOSING_PUNCT.test(cur.text);
+  return naturalEnd && (nextStartsNewPoint || paraCount >= SOFT_PARAS + 2);
 }
 
 function segmentChapter(chapter: Chapter): RawUnit[] {
