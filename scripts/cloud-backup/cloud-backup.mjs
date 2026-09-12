@@ -247,7 +247,11 @@ async function cmdBackup(args) {
  */
 export function pruneBackups(backupDir, { dailyKeep, weeklyKeep }) {
   const fsLike = { basename: path.basename, dirname: path.dirname, realpathSync: fs.realpathSync };
-  const entries = fs.readdirSync(backupDir).filter((n) => isManagedBackupName(n));
+  // 保留策略只对 .db 主体计算；manifest（.db.json）跟随自己的 .db 一起删，
+  // 不作为独立候选，否则先随 .db 删除后会触发一次误报 WARN。
+  const entries = fs
+    .readdirSync(backupDir)
+    .filter((n) => isManagedBackupName(n) && n.endsWith('.db'));
   const { keep, delete: doomed } = planRetention(entries, { dailyKeep, weeklyKeep });
   let deleted = 0;
   for (const name of doomed) {
