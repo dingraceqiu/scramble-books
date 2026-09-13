@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# scramble-books-key-rotation.sh 的故障注入测试（2026-09-13）
+# scramble-books-key-rotation.sh 的故障注入测试（v3，2026-09-13）
 #
 # 在隔离 tmp 环境中用假 systemctl/curl/journalctl 驱动轮换脚本，覆盖：
-#   A. 基线成功：全链路通过，密钥不出现在任何子进程 argv 日志中
+#   A. 基线成功：全链路通过；密钥不出现在任何子进程 argv 日志；verify 通过；
+#      cleanup（YES 确认）删除单个回滚文件与空目录；重复 cleanup 幂等
 #   B. restart 立即失败 → 必须回滚（退出码 3，unit 恢复为轮换前内容）
 #   C. 服务延迟退出（health 通过后进程死掉）→ 必须回滚（退出码 3）
-#   D. GLM 探针失败 → 不回滚（服务在线），退出码 4
-#   E. 回滚成功路径本身可恢复服务（B/C 中断言）
-#   F. cleanup 删除含旧密钥的回滚副本
+#   D. GLM 探针失败（最终验证失败）→ 必须回滚（退出码 4，unit 恢复旧配置）
+#   E. journal 出现新密钥 → 必须回滚（退出码 4）
+#   F. 回滚副本创建失败 → 修改 unit/envfile 之前终止（退出码 2，零修改）
+#   G. cleanup 拒绝路径：服务未运行 / 确认词不符 → 零删除
+#   H. 危险路径注入全部拒绝：SB_TEST_ROOT=/ 、逃逸到 /etc、相对路径逃逸、
+#      符号链接逃逸（canary 零删除）、生产模式 SB_* 注入、空变量、空 SB_TEST_ROOT
 #
-# 用法（root 或配好 sudo 的环境直接跑）：
-#   sudo bash test-key-rotation.sh ../path/to/scramble-books-key-rotation.sh
-# 所有 SB_* 覆盖只指向 tmp 目录，绝不触碰真实 systemd/数据库。
+# 用法（root，或 GitHub runner 的 sudo）：
+#   sudo bash test-key-rotation.sh <scramble-books-key-rotation.sh>
+# 全程 SB_TEST_MODE=1 + SB_TEST_ROOT 限定在隔离 tmp 目录，绝不触碰真实 systemd/数据库。
 set -u
 
 SCRIPT_UNDER_TEST="${1:?用法: test-key-rotation.sh <scramble-books-key-rotation.sh>}"
@@ -39,6 +43,24 @@ assert_contains() { # haystack needle what
   fi
 }
 
+assert_path_exists() { # path what
+  if [ -e "$1" ]; then
+    PASS=$((PASS + 1))
+  else
+    FAILED=$((FAILED + 1))
+    printf 'FAIL [%s] %s: 路径不存在 <%s>\n' "$CURRENT_CASE" "$3" "$1"
+  fi
+}
+
+assert_path_absent() { # path what
+  if [ -e "$1" ]; then
+    FAILED=$((FAILED + 1))
+    printf 'FAIL [%s] %s: 路径不应存在 <%s>\n' "$CURRENT_CASE" "$3" "$1"
+  else
+    PASS=$((PASS + 1))
+  fi
+}
+
 assert_key_absent_from_logs() { # dir key
   if grep -rqF -- "$2" "$1" 2>/dev/null; then
     FAILED=$((FAILED + 1))
@@ -58,7 +80,7 @@ new_env() {
   mkdir -p "$BIN" "$STATE" "$T/proc/42" "$T/data"
   TESTKEY="TESTKEY$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')probe"
 
-  # 假 sleep：立即返回（真实测试窗口由假 curl/systemctl 的确定性状态机模拟）
+  # 假 sleep：立即返回（时序由假 curl/systemctl 的确定性状态机模拟）
   printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/sleep"
 
   # 假 systemctl：restart/is-active/daemon-reload/show 的确定性状态机
@@ -68,11 +90,11 @@ S="$SB_STATE"
 cmd="$1"
 shift || true
 echo "$cmd $*" >> "$S/cmd.log"
-  case "$cmd" in
-    daemon-reload)
-      if [ -n "${SBF_DAEMON_RELOAD_FAIL:-}" ]; then exit 1; fi
-      exit 0
-      ;;
+case "$cmd" in
+  daemon-reload)
+    if [ -n "${SBF_DAEMON_RELOAD_FAIL:-}" ]; then exit 1; fi
+    exit 0
+    ;;
   restart)
     if [ -n "${SBF_RESTART_FAIL:-}" ] && [ ! -f "$S/restart_failed_once" ]; then
       touch "$S/restart_failed_once"
@@ -170,40 +192,89 @@ EOF
   export SB_STATE="$STATE"
 }
 
-# run_script <mode>：以隔离 SB_* 环境执行被测脚本，回显输出并返回其退出码
+# run_script <mode> <stdin>：以隔离 SB_* 环境执行被测脚本，输出写 $T/out.log，返回退出码
 run_script() {
-  local mode="$1"
-  local out
+  local mode="$1" stdin="${2-}"
+  local rc
   set +e
-  out=$(
-    SB_UNIT="$T/unit" \
-      SB_ENVFILE="$T/envfile" \
-      SB_DB="$T/data/cloud.db" \
-      SB_BACKUP_DIR="$T/rootbackup" \
-      SB_SYSTEMCTL="$BIN/systemctl" \
-      SB_CURL="$BIN/curl" \
-      SB_JOURNALCTL="$BIN/journalctl" \
-      SB_SLEEP="$BIN/sleep" \
-      SB_PROC="$T/proc" \
-      SB_HEALTH_URL="http://fake:5000/api/health" \
-      SB_APP_URL="http://fake/scramble-books/" \
-      SB_GLM_URL="http://fake/api/ai-titles" \
-      bash "$SCRIPT_UNDER_TEST" "$mode" 2>&1 <<< "$TESTKEY"
-  )
-  local rc=$?
+  (
+    export SB_TEST_MODE=1
+    export SB_TEST_ROOT="$T"
+    export SB_UNIT="$T/unit"
+    export SB_ENVFILE="$T/envfile"
+    export SB_DB="$T/data/cloud.db"
+    export SB_BACKUP_DIR="$T/rootbackup"
+    export SB_SYSTEMCTL="$BIN/systemctl"
+    export SB_CURL="$BIN/curl"
+    export SB_JOURNALCTL="$BIN/journalctl"
+    export SB_SLEEP="$BIN/sleep"
+    export SB_PROC="$T/proc"
+    export SB_HEALTH_URL="http://fake:5000/api/health"
+    export SB_APP_URL="http://fake/scramble-books/"
+    export SB_GLM_URL="http://fake/api/ai-titles"
+    cd "$T" || exit 2
+    bash "$SCRIPT_UNDER_TEST" "$mode" 2>&1 <<< "$stdin"
+  ) > "$T/out.log"
+  rc=$?
   set -e
-  printf '%s\n' "$out" > "$T/out.log"
   printf '%s' "$rc"
+}
+
+# run_danger <mode> <stdin> [cwd]：危险注入场景专用（期望被守卫拒绝）
+run_danger() {
+  local mode="$1" stdin="$2" cwd="${3:-$T}"
+  local rc
+  set +e
+  (
+    # shellcheck disable=SC2086
+    cd "$cwd" && env \
+      SB_TEST_MODE="${D_TEST_MODE-}" \
+      SB_TEST_ROOT="${D_TEST_ROOT-}" \
+      SB_UNIT="${D_UNIT-}" \
+      SB_ENVFILE="${D_ENVFILE-}" \
+      SB_DB="${D_DB-}" \
+      SB_BACKUP_DIR="${D_BACKUP-}" \
+      SB_SYSTEMCTL="${D_SYSTEMCTL-}" \
+      SB_CURL="${D_CURL-}" \
+      SB_JOURNALCTL="${D_JOURNALCTL-}" \
+      SB_SLEEP="${D_SLEEP-}" \
+      SB_PROC="${D_PROC-}" \
+      SB_HEALTH_URL="${D_HEALTH-}" \
+      SB_APP_URL="${D_APP-}" \
+      SB_GLM_URL="${D_GLM-}" \
+      bash "$SCRIPT_UNDER_TEST" "$mode" 2>&1 <<< "$stdin"
+  ) > "$T/out.log"
+  rc=$?
+  set -e
+  printf '%s' "$rc"
+}
+
+# 危险场景的「合法」基准值（除被注入的那个变量外全部合规）
+set_danger_defaults() {
+  D_TEST_MODE=1
+  D_TEST_ROOT="$T"
+  D_UNIT="$T/unit"
+  D_ENVFILE="$T/envfile"
+  D_DB="$T/data/cloud.db"
+  D_BACKUP="$T/rootbackup"
+  D_SYSTEMCTL="$BIN/systemctl"
+  D_CURL="$BIN/curl"
+  D_JOURNALCTL="$BIN/journalctl"
+  D_SLEEP="$BIN/sleep"
+  D_PROC="$T/proc"
+  D_HEALTH="http://fake:5000/api/health"
+  D_APP="http://fake/scramble-books/"
+  D_GLM="http://fake/api/ai-titles"
 }
 
 begin_case() { CURRENT_CASE="$1"; }
 set -e
 
-# ---- Case A：基线成功 -------------------------------------------------------
+# ---- Case A：基线成功 + verify + cleanup（YES）+ 重复 cleanup -----------------
 begin_case "A-基线成功"
 new_env
-rc=$(run_script apply)
-assert_eq "$rc" "0" "退出码"
+rc=$(run_script apply "$TESTKEY")
+assert_eq "$rc" "0" "apply 退出码"
 unit_now=$(cat "$T/unit")
 assert_contains "$unit_now" "$NEW_MARKER" "unit 含 EnvironmentFile="
 if printf '%s' "$unit_now" | grep -qF "$OLD_MARKER"; then
@@ -214,7 +285,7 @@ fi
 backup_file="$T/rootbackup/scramble-books.service.pre-rotation"
 assert_contains "$(cat "$backup_file")" "$OLD_MARKER" "回滚副本含轮换前 unit"
 assert_eq "$(stat -Lc '%a' "$backup_file")" "600" "回滚副本权限 0600"
-assert_eq "$(stat -Lc '%a' "$T/rootbackup")" "700" "回滚目录权限 0700"
+assert_eq "$(stat -Lc '%a %U %G' "$T/rootbackup")" "700 root root" "回滚目录 0700 root:root"
 assert_contains "$(cat "$T/envfile")" "$TESTKEY" "envfile 含新密钥"
 assert_eq "$(stat -Lc '%a' "$T/envfile")" "600" "envfile 权限 0600"
 assert_eq "$(stat -Lc '%a' "$T/data/cloud.db")" "600" "cloud.db 0600"
@@ -222,23 +293,21 @@ assert_eq "$(stat -Lc '%a' "$T/data/cloud.db-wal")" "600" "wal 0600"
 assert_eq "$(stat -Lc '%a' "$T/data/cloud.db.bak-20260908-pre-v2")" "600" "旧 bak 0600"
 assert_key_absent_from_logs "$STATE" "$TESTKEY"
 assert_contains "$(cat "$T/out.log")" "撤销旧密钥" "提示撤销旧密钥"
-# Case F 前置：cleanup 删除回滚副本
-rc=$(run_script cleanup)
-assert_eq "$rc" "0" "cleanup 退出码"
-if [ -d "$T/rootbackup" ]; then
-  FAILED=$((FAILED + 1)); printf 'FAIL [%s] cleanup 后回滚目录仍存在\n' "$CURRENT_CASE"
-else
-  PASS=$((PASS + 1))
-fi
-# verify 模式（无密钥）对成功配置应通过
-rc=$(run_script verify)
+rc=$(run_script verify "")
 assert_eq "$rc" "0" "verify 退出码"
+rc=$(run_script cleanup "YES")
+assert_eq "$rc" "0" "cleanup 退出码"
+assert_path_absent "$backup_file" "回滚文件已删"
+assert_path_absent "$T/rootbackup" "空目录已 rmdir"
+rc=$(run_script cleanup "YES")
+assert_eq "$rc" "0" "重复 cleanup 幂等退出码"
+assert_contains "$(cat "$T/out.log")" "无需清理" "重复 cleanup 提示无需清理"
 
 # ---- Case B：restart 立即失败 → 回滚 ----------------------------------------
 begin_case "B-restart立即失败"
 new_env
 export SBF_RESTART_FAIL=1
-rc=$(run_script apply)
+rc=$(run_script apply "$TESTKEY")
 unset SBF_RESTART_FAIL
 assert_eq "$rc" "3" "退出码（启动失败）"
 assert_eq "$(cat "$STATE/state")" "up" "回滚后服务恢复运行"
@@ -254,7 +323,7 @@ assert_key_absent_from_logs "$STATE" "$TESTKEY"
 begin_case "C-服务延迟退出"
 new_env
 export SBF_DELAYED_EXIT=1
-rc=$(run_script apply)
+rc=$(run_script apply "$TESTKEY")
 unset SBF_DELAYED_EXIT
 assert_eq "$rc" "3" "退出码（启动失败）"
 assert_eq "$(cat "$STATE/state")" "up" "回滚后服务恢复运行"
@@ -265,15 +334,20 @@ else
 fi
 assert_contains "$(cat "$T/out.log")" "已回滚" "输出回滚成功信息"
 
-# ---- Case D：GLM 探针失败 → 不回滚，退出码 4 ---------------------------------
-begin_case "D-GLM失败"
+# ---- Case D：GLM 探针失败（最终验证失败）→ 回滚 ------------------------------
+begin_case "D-GLM验证失败回滚"
 new_env
 export SBF_GLM_FAIL=1
-rc=$(run_script apply)
+rc=$(run_script apply "$TESTKEY")
 unset SBF_GLM_FAIL
-assert_eq "$rc" "4" "退出码（验证失败）"
-assert_contains "$(cat "$T/unit")" "$NEW_MARKER" "unit 保持新配置（未回滚）"
-assert_contains "$(cat "$T/unit")" "UMask=0077" "unit 含 UMask=0077"
+assert_eq "$rc" "4" "退出码（最终验证失败）"
+assert_eq "$(cat "$STATE/state")" "up" "回滚后服务恢复运行"
+if cmp -s "$T/unit" "$T/rootbackup/scramble-books.service.pre-rotation"; then
+  PASS=$((PASS + 1))
+else
+  FAILED=$((FAILED + 1)); printf 'FAIL [%s] 验证失败后 unit 未恢复为轮换前内容\n' "$CURRENT_CASE"
+fi
+assert_contains "$(cat "$T/out.log")" "已回滚" "输出回滚成功信息"
 assert_contains "$(cat "$T/out.log")" "不要撤销旧密钥" "提示暂缓撤销"
 assert_contains "$(cat "$T/out.log")" "ok=false" "GLM 探针只输出布尔"
 if printf '%s' "$(cat "$T/out.log")" | grep -q 'GLM HTTP 503'; then
@@ -283,14 +357,114 @@ else
 fi
 assert_key_absent_from_logs "$STATE" "$TESTKEY"
 
-# ---- Case E：journal 出现新密钥 → 验证失败，退出码 4 --------------------------
-begin_case "E-journal泄漏"
+# ---- Case E：journal 出现新密钥 → 回滚 ---------------------------------------
+begin_case "E-journal泄漏回滚"
 new_env
 export SBF_JOURNAL_LEAK=1
-rc=$(run_script apply)
+rc=$(run_script apply "$TESTKEY")
 unset SBF_JOURNAL_LEAK
-assert_eq "$rc" "4" "退出码（验证失败）"
+assert_eq "$rc" "4" "退出码（最终验证失败）"
 assert_contains "$(cat "$T/out.log")" "journal 新增密钥命中    → 1" "journal 扫描命中计数"
+if cmp -s "$T/unit" "$T/rootbackup/scramble-books.service.pre-rotation"; then
+  PASS=$((PASS + 1))
+else
+  FAILED=$((FAILED + 1)); printf 'FAIL [%s] journal 泄漏后 unit 未恢复为轮换前内容\n' "$CURRENT_CASE"
+fi
+
+# ---- Case F：回滚副本创建失败 → 修改 unit/envfile 之前终止 -------------------
+begin_case "F-副本创建失败"
+new_env
+: > "$T/fileparent" # 普通文件，使其下无法建目录
+set +e
+(
+  export SB_TEST_MODE=1 SB_TEST_ROOT="$T"
+  export SB_UNIT="$T/unit" SB_ENVFILE="$T/envfile" SB_DB="$T/data/cloud.db"
+  export SB_BACKUP_DIR="$T/fileparent/sub"
+  export SB_SYSTEMCTL="$BIN/systemctl" SB_CURL="$BIN/curl" SB_JOURNALCTL="$BIN/journalctl"
+  export SB_SLEEP="$BIN/sleep" SB_PROC="$T/proc"
+  export SB_HEALTH_URL="http://fake:5000/api/health" SB_APP_URL="http://fake/scramble-books/" SB_GLM_URL="http://fake/api/ai-titles"
+  cd "$T" || exit 2
+  bash "$SCRIPT_UNDER_TEST" apply 2>&1 <<< "$TESTKEY"
+) > "$T/out.log"
+rc=$?
+set -e
+assert_eq "$rc" "2" "退出码（前置失败）"
+assert_contains "$(cat "$T/unit")" "$OLD_MARKER" "unit 保持原样（零修改）"
+assert_path_absent "$T/envfile" "envfile 未创建"
+assert_eq "$(cat "$STATE/state")" "up" "服务状态未受影响"
+
+# ---- Case G：cleanup 拒绝路径（零删除）---------------------------------------
+begin_case "G-cleanup拒绝"
+new_env
+rc=$(run_script apply "$TESTKEY")
+assert_eq "$rc" "0" "apply 成功（准备 cleanup 场景）"
+backup_file="$T/rootbackup/scramble-books.service.pre-rotation"
+# G1: 服务未运行
+echo down > "$STATE/state"
+rc=$(run_script cleanup "YES")
+assert_eq "$rc" "2" "服务未运行 → 拒绝"
+assert_path_exists "$backup_file" "拒绝后回滚文件仍在"
+# G2: 确认词不符
+echo up > "$STATE/state"
+rc=$(run_script cleanup "yes")
+assert_eq "$rc" "2" "确认词不符 → 拒绝"
+assert_path_exists "$backup_file" "拒绝后回滚文件仍在"
+rc=$(run_script cleanup "")
+assert_eq "$rc" "2" "空确认 → 拒绝"
+assert_path_exists "$backup_file" "拒绝后回滚文件仍在"
+
+# ---- Case H：危险路径注入全部拒绝（零删除）-----------------------------------
+begin_case "H-危险路径"
+# H1: SB_TEST_ROOT=/
+set_danger_defaults
+D_TEST_ROOT="/"
+D_BACKUP="$T/rootbackup"
+rc=$(run_danger cleanup "YES")
+assert_eq "$rc" "2" "SB_TEST_ROOT=/ → 拒绝"
+assert_path_exists "/etc/passwd" "系统目录未受影响"
+# H2: 逃逸到 /etc
+set_danger_defaults
+D_BACKUP="/etc/scramble-evil"
+rc=$(run_danger cleanup "YES")
+assert_eq "$rc" "2" "SB_BACKUP_DIR=/etc/... → 拒绝"
+assert_path_absent "/etc/scramble-evil" "/etc 未被创建/删除"
+# H3: 相对路径逃逸（cwd=/tmp，../etc/rot → /etc/rot）
+set_danger_defaults
+D_BACKUP="../etc/rot"
+rc=$(run_danger cleanup "YES" "/tmp")
+assert_eq "$rc" "2" "相对路径逃逸 → 拒绝"
+assert_path_absent "/etc/rot" "/etc 未被创建/删除"
+# H4: 符号链接逃逸（canary 必须零删除）
+set_danger_defaults
+EVIL="$(mktemp -d /tmp/sb-rot-evil.XXXXXX)"
+EVIL_CANARY="$EVIL/canary"
+: > "$EVIL_CANARY"
+ln -s "$EVIL" "$T/linkdir"
+D_BACKUP="$T/linkdir"
+rc=$(run_danger cleanup "YES")
+assert_eq "$rc" "2" "符号链接逃逸 → 拒绝"
+assert_path_exists "$EVIL_CANARY" "链接目标 canary 零删除"
+# H5: 生产模式 SB_* 注入（未显式 SB_TEST_MODE=1）
+set_danger_defaults
+D_TEST_MODE=""
+D_TEST_ROOT=""
+rc=$(run_danger cleanup "YES")
+assert_eq "$rc" "2" "生产模式 SB_* 注入 → 拒绝"
+# H6: 测试模式空变量（禁止回退生产默认）
+set_danger_defaults
+D_UNIT=""
+rc=$(run_danger cleanup "YES")
+assert_eq "$rc" "2" "测试模式空 SB_UNIT → 拒绝"
+# H7: 空 SB_TEST_ROOT
+set_danger_defaults
+D_TEST_ROOT=""
+rc=$(run_danger cleanup "YES")
+assert_eq "$rc" "2" "空 SB_TEST_ROOT → 拒绝"
+# H8: SB_TEST_MODE 值非法
+set_danger_defaults
+D_TEST_MODE="true"
+rc=$(run_danger cleanup "YES")
+assert_eq "$rc" "2" "SB_TEST_MODE=true（非 1）→ 拒绝"
 
 printf '\n测试结果: PASS=%d FAIL=%d\n' "$PASS" "$FAILED"
 [ "$FAILED" -eq 0 ]
