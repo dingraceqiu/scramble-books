@@ -212,7 +212,8 @@ UMask=0077
 WorkingDirectory=/home/ubuntu/apps/scramble-books
 Environment=COZE_PROJECT_ENV=PROD
 Environment=PORT=5000
-Environment=HOSTNAME=0.0.0.0
+# 监听面收紧：Node 只绑回环，公网必须经本机 Nginx 反代（server.ts 读 LISTEN_HOST）
+Environment=LISTEN_HOST=127.0.0.1
 Environment=CLOUD_DB_PATH=/home/ubuntu/apps/data/cloud.db
 Environment=GLM_MODEL=glm-4-flash-250414
 EnvironmentFile=/etc/default/scramble-books
