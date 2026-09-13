@@ -7,14 +7,18 @@
  * 1. 三个接口全部经过守卫（超频 429 + Retry-After + 稳定 JSON code）；
  * 2. 合法请求正常触达 GLM mock（调用计数 +1，标题单项截断生效）；
  * 3. 超大请求体在业务逻辑前被 413 拒绝；item 数/单项/总字符边界（400/413）；
- * 4. 每桶每日额度、全局每日硬上限（含探针诚实失败）；
+ * 4. 每桶每日请求额度；全局每日 GLM 真实调用预算由 glmChat 在 fetch 前统一 consume
+ *    （400/413/空文本/未配置/classify 不走 GLM 均不消耗；上游失败仍计 attempt；
+ *    耗尽后零上游调用，含探针在内诚实失败）；
  * 5. 桶级与全局并发限制；
  * 6. 登录用户独立于 IP 桶；本地匿名用户不受影响；
  * 7. 伪造 X-Forwarded-For 不能绕过（nginx 追加语义：最右非可信地址才是桶）；
  * 8. 被拒绝请求的 GLM mock 调用次数为 0；
  * 9. 拒绝响应不泄露正文标记、token 或密钥；
  * 10. 轮换探针（回环直连、无代理链）在小额度桶内正常验证、隔离于外部流量、
- *     全局额度耗尽时诚实失败（无 generator 哨兵）。
+ *     全局额度耗尽时诚实失败（无 generator 哨兵）；
+ * 11. stale bucket GC：过期分钟窗/日计数条目被清扫，活跃与 global:day 保留，
+ *     守卫请求自动触发清扫（内存不随唯一 IP 数无限增长）。
  */
 import http from 'node:http';
 import assert from 'node:assert';
@@ -38,25 +42,38 @@ const GLM_RESPONSES: Record<string, string> = {
   '/api/classify-book': JSON.stringify({ choices: [{ message: { content: '{"bookType":"history","reason":"史料定性"}' } }] }),
 };
 
-/** GLM mock：记录每次上游调用与最近一次请求体，可注入延迟（并发测试） */
+/** GLM mock：记录每次上游调用与最近一次请求体，可注入失败/延迟（并发测试） */
 let glmCalls = 0;
 let lastGlmBody = '';
+let glmFailNext = false;
 const realFetch = globalThis.fetch;
-(globalThis as { fetch: typeof fetch }).fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
-  const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
-  if (urlStr.includes('open.bigmodel.cn')) {
-    glmCalls++;
-    const body = typeof init?.body === 'string' ? init.body : '';
-    lastGlmBody = body;
-    // 按请求路径近似返回（mock 不真正解析 messages）
-    const key = body.includes('知识点') ? '/api/knowledge-points' : body.includes('图书分类') ? '/api/classify-book' : '/api/ai-titles';
-    return new Response(GLM_RESPONSES[key], { status: 200, headers: { 'Content-Type': 'application/json' } });
-  }
-  if (urlStr.includes('googleapis.com')) {
-    return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-  }
-  return realFetch(url, init);
-}) as typeof fetch;
+
+function installDefaultFetchMock(): void {
+  (globalThis as { fetch: typeof fetch }).fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+    if (urlStr.includes('open.bigmodel.cn')) {
+      glmCalls++;
+      const body = typeof init?.body === 'string' ? init.body : '';
+      lastGlmBody = body;
+      if (glmFailNext) {
+        glmFailNext = false;
+        return new Response('{"error":{"message":"mock upstream failure"}}', { status: 500 });
+      }
+      // 按请求路径近似返回（mock 不真正解析 messages）
+      const key = body.includes('知识点') ? '/api/knowledge-points' : body.includes('图书分类') ? '/api/classify-book' : '/api/ai-titles';
+      return new Response(GLM_RESPONSES[key], { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (urlStr.includes('googleapis.com')) {
+      return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return realFetch(url, init);
+  }) as typeof fetch;
+}
+
+/** 全局每日 GLM 预算计数（consumeGlmCallBudget 的真实状态） */
+const globalBudgetCount = (): number => guard.__abuseGuardInternalsForTests().dayCounters.get('global:day')?.count ?? 0;
+
+installDefaultFetchMock();
 
 // ---------- 启动被测应用（临时端口） ----------
 
@@ -98,6 +115,7 @@ async function req(pathname: string, opts: { body?: unknown; xff?: string; token
 const textOf = (n: number): string => `${TEXT_MARKER}${'读书是把别人的思考变成自己血肉的过程。'.repeat(Math.ceil(n / 20))}`.slice(0, n);
 const titlesBody = (n: number, chars = 100) => ({ items: Array.from({ length: n }, (_, i) => ({ id: `u${i}`, text: textOf(chars) })) });
 const PROBE_BODY = { items: [{ id: 'probe', text: '读书是把别人的思考变成自己血肉的过程。读得多不如读得深，深度决定复利的利率。' }] };
+const guardDayKeyOf = (now: number): string => new Date(now).toISOString().slice(0, 10);
 
 let passed = 0;
 const failures: string[] = [];
@@ -214,18 +232,95 @@ guard.__configureAbuseGuardForTests({ ...guard.loadAbuseGuardConfig(), dailyPerB
   check('额度拒绝不触达 GLM mock', glmCalls - before === 4);
 }
 
-// ---------- 6. 全局每日硬上限（含探针诚实失败） ----------
+// ---------- 6. 全局每日 GLM 真实调用预算（glmChat 入口统一 consume） ----------
 
 guard.__configureAbuseGuardForTests({ ...guard.loadAbuseGuardConfig(), dailyGlobal: 2, ratePerMin: 100 });
 {
   const before = glmCalls;
   await req('/api/ai-titles', { body: titlesBody(1), xff: '10.6.0.1' });
   await req('/api/ai-titles', { body: titlesBody(1), xff: '10.6.0.2' });
+  check('两次合法 glmChat 后预算消耗恰为 2', globalBudgetCount() === 2);
   const exhausted = await req('/api/ai-titles', { body: titlesBody(1), xff: '10.6.0.3' });
+  check('预算耗尽 → 200 ok:false（glmChat 在 fetch 前抛错）', exhausted.status === 200 && exhausted.body?.ok === false);
+  check('耗尽后的请求不再触达 GLM mock（零上游调用）', glmCalls === before + 2);
   const probe = await req('/api/ai-titles', { body: PROBE_BODY });
-  check('全局额度耗尽 → 429（global_quota_exceeded）', exhausted.status === 429 && exhausted.body?.code === 'global_quota_exceeded');
-  check('全局耗尽时探针诚实失败（无 generator 哨兵）', probe.status === 429 && probe.body?.generator === undefined);
-  check('全局拒绝不触达 GLM mock', glmCalls - before === 2);
+  check('全局耗尽时探针诚实失败（无 generator 哨兵）', probe.status === 200 && probe.body?.generator === undefined && probe.body?.ok === false);
+  check('探针被拒不触达 GLM mock', glmCalls === before + 2);
+}
+
+// ---------- 6b. 消耗语义：只有真实 glmChat 调用消耗全局预算 ----------
+
+guard.__configureAbuseGuardForTests({ ...guard.loadAbuseGuardConfig(), dailyGlobal: 1000, ratePerMin: 100 });
+{
+  check('重置后预算为 0', globalBudgetCount() === 0);
+
+  // 400 items 非法（缺正文）连续请求
+  for (let i = 0; i < 5; i++) {
+    const r = await req('/api/ai-titles', { body: { items: [{ id: 'x' }] }, xff: '10.60.0.1' });
+    if (r.status !== 400) { check('items 非法返回 400', false); break; }
+  }
+  check('items 非法（400）连续请求不消耗 GLM 全局预算', globalBudgetCount() === 0);
+
+  // 413 超大请求体
+  const big = await req('/api/ai-titles', { body: { items: [{ id: 'x', text: 'y'.repeat(200 * 1024) }] }, xff: '10.60.0.2' });
+  check('超大请求体（413）不消耗 GLM 全局预算', big.status === 413 && globalBudgetCount() === 0);
+
+  // 空文本 / 无有效文本
+  const empty = await req('/api/ai-titles', { body: { items: [] }, xff: '10.60.0.3' });
+  check('空 items（无有效文本）不消耗 GLM 全局预算', empty.status === 200 && empty.body?.ok === false && globalBudgetCount() === 0);
+  const blank = await req('/api/knowledge-points', { body: { items: [{ id: 'k', text: '   ' }] }, xff: '10.60.0.4' });
+  check('纯空白文本（400）不消耗 GLM 全局预算', blank.status === 400 && globalBudgetCount() === 0);
+
+  // GLM 未配置
+  const savedKey = process.env.GLM_API_KEY;
+  delete process.env.GLM_API_KEY;
+  const unconfigured = await req('/api/ai-titles', { body: titlesBody(1), xff: '10.60.0.5' });
+  process.env.GLM_API_KEY = savedKey;
+  check('GLM 未配置（未配置即降级）不消耗 GLM 全局预算', unconfigured.status === 200 && unconfigured.body?.error === 'GLM_API_KEY 未配置' && globalBudgetCount() === 0);
+
+  // classify-book：EPUB 元数据直接命中（不调用 GLM）
+  const epub = await req('/api/classify-book', { body: { title: '随便什么书', subjects: ['历史著作'] } });
+  check('classify EPUB 元数据命中（不走 glmChat）不消耗预算', epub.status === 200 && epub.body?.source === 'epub' && globalBudgetCount() === 0);
+
+  // classify-book：证据不足走 GLM 兜底裁决 → 消耗 1
+  const glmClassified = await req('/api/classify-book', { body: { title: '人类简史', author: '尤瓦尔·赫拉利' } });
+  check('classify 走 GLM 兜底裁决消耗 1 次预算', glmClassified.status === 200 && globalBudgetCount() === 1);
+
+  // 一次真实 ai-titles glmChat 正好消耗 1
+  const beforeOne = globalBudgetCount();
+  const okReq = await req('/api/ai-titles', { body: titlesBody(2), xff: '10.60.0.6' });
+  check('一次真实 glmChat 正好消耗 1 次预算', okReq.status === 200 && globalBudgetCount() - beforeOne === 1);
+
+  // 上游失败仍消耗该次 attempt
+  const beforeFail = globalBudgetCount();
+  const failCallsBefore = glmCalls;
+  glmFailNext = true;
+  const upstreamFail = await req('/api/ai-titles', { body: titlesBody(1), xff: '10.60.0.7' });
+  check('GLM 上游失败仍消耗该次 attempt（fetch 已发出 + 预算 +1）', upstreamFail.status === 200 && upstreamFail.body?.ok === false && globalBudgetCount() - beforeFail === 1 && glmCalls - failCallsBefore === 1);
+}
+
+// ---------- 6c. stale bucket GC ----------
+
+{
+  const { minuteWindows, dayCounters } = guard.__abuseGuardInternalsForTests();
+  const now = Date.now();
+  minuteWindows.set('ip:deadbeef:rate', { winStart: now - 10 * 60000, count: 7 });
+  minuteWindows.set('ip:fresh1:rate', { winStart: now - 1000, count: 1 });
+  dayCounters.set('ip:stale-day:day', { day: '2020-01-01', count: 5 });
+  dayCounters.set('ip:fresh-day:day', { day: guardDayKeyOf(now), count: 2 });
+  dayCounters.set('global:day', { day: '2020-01-01', count: 9 });
+  guard.sweepStaleBuckets(now);
+  check('过期分钟窗 bucket 被清扫', !minuteWindows.has('ip:deadbeef:rate'));
+  check('活跃分钟窗 bucket 保留', minuteWindows.has('ip:fresh1:rate'));
+  check('过期日计数 bucket 被清扫', !dayCounters.has('ip:stale-day:day'));
+  check('今日日计数 bucket 保留', dayCounters.has('ip:fresh-day:day'));
+  check('global:day 不被清扫（bumpDay 按日翻新）', dayCounters.has('global:day'));
+
+  // 自动清扫：lastSweepAt 重置为 0 后，下一次守卫请求应触发 sweep
+  guard.resetAbuseGuardForTests();
+  minuteWindows.set('ip:autogc:rate', { winStart: Date.now() - 10 * 60000, count: 3 });
+  await req('/api/ai-titles', { body: titlesBody(1), xff: '10.60.1.1' });
+  check('守卫请求自动触发 stale 清扫', !minuteWindows.has('ip:autogc:rate'));
 }
 
 // ---------- 7. 并发限制（桶级 + 全局） ----------
@@ -286,19 +381,7 @@ guard.__configureAbuseGuardForTests({ ...guard.loadAbuseGuardConfig(), dailyGlob
 
 // ---------- 恢复默认 mock ----------
 
-(globalThis as { fetch: typeof fetch }).fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
-  const urlStr = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
-  if (urlStr.includes('open.bigmodel.cn')) {
-    glmCalls++;
-    const body = typeof init?.body === 'string' ? init.body : '';
-    const key = body.includes('知识点') ? '/api/knowledge-points' : body.includes('图书分类') ? '/api/classify-book' : '/api/ai-titles';
-    return new Response(GLM_RESPONSES[key], { status: 200, headers: { 'Content-Type': 'application/json' } });
-  }
-  if (urlStr.includes('googleapis.com')) {
-    return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-  }
-  return realFetch(url, init);
-}) as typeof fetch;
+installDefaultFetchMock();
 
 // ---------- 8. 登录用户独立桶 / 匿名用户不受影响 ----------
 
