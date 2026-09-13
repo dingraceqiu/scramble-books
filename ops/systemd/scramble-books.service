@@ -1,0 +1,24 @@
+[Unit]
+Description=Scramble Books (刷书) Node server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+# 2026-09-13 安全加固：服务新建文件（含 SQLite WAL/SHM）默认仅属主可读写
+UMask=0077
+WorkingDirectory=/home/ubuntu/apps/scramble-books
+Environment=COZE_PROJECT_ENV=PROD
+Environment=PORT=5000
+Environment=HOSTNAME=0.0.0.0
+Environment=CLOUD_DB_PATH=/home/ubuntu/apps/data/cloud.db
+Environment=GLM_MODEL=glm-4-flash-250414
+# GLM_API_KEY 移入 root-only EnvironmentFile（/etc/default/scramble-books，0600），
+# 不再内联在 unit 中，避免经 systemctl/audit 路径进入 journald
+EnvironmentFile=/etc/default/scramble-books
+ExecStart=/usr/bin/node dist-server/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
