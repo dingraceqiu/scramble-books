@@ -2,52 +2,28 @@
 // ABOUTME: Handles API routes and serves frontend in dev/prod modes
 
 import { createServer, type Server } from 'http';
-import express from 'express';
-import router, { initCloud } from './routes/index';
+import { createApp, globalErrorHandler } from './app';
+import { initCloud } from './routes/index';
 import { setupVite } from './vite';
 
 const isDev = process.env.COZE_PROJECT_ENV !== 'PROD';
 const port = parseInt(process.env.PORT || '5000', 10);
 const hostname = process.env.HOSTNAME || 'localhost';
-const app = express();
-// 使用 http.createServer 包装 Express app，以便支持 WebSocket 等协议升级
-const server = createServer(app);
 
 async function startServer(): Promise<Server> {
-  // 请求日志（仅开发环境）
-  if (isDev) {
-    app.use((req, res, next) => {
-      const start = Date.now();
-      res.on('finish', () => {
-        const ms = Date.now() - start;
-        console.log(`${req.method} ${req.url} - ${ms}ms`);
-      });
-      next();
-    });
-  }
+  const app = createApp();
 
-  // 添加请求体解析（云端整库快照可能含封面 dataURL，上限放宽到 70MB）
-  app.use(express.json({ limit: '70mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '70mb' }));
+  // 使用 http.createServer 包装 Express app，以便支持 WebSocket 等协议升级
+  const server = createServer(app);
 
   // 初始化云端 SQLite（邀请码/用户/会话/用户数据）
   initCloud();
 
-  // 注册 API 路由
-  app.use(router);
-
-  // 集成 Vite（开发模式）或静态文件服务（生产模式）
+  // 集成 Vite（开发模式）或静态文件服务（生产模式）；API 路由已在 createApp 内注册
   await setupVite(app);
 
   // 全局错误处理
-  app.use((err: Error, _req: express.Request, res: express.Response, next: express.NextFunction) => {
-    void next;
-    console.error('Server error:', err);
-    const status = 'status' in err ? (err as { status?: number }).status ?? 500 : 500;
-    res.status(status).json({
-      error: err.message || 'Internal server error',
-    });
-  });
+  app.use(globalErrorHandler);
 
   server.once('error', err => {
     console.error('Server error:', err);

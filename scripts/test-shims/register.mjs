@@ -32,6 +32,10 @@ function resolveShim(specifier, context, nextResolve) {
   if (specifier === 'i18next' || specifier === 'react-i18next' || specifier === 'i18next-browser-languagedetector') {
     return { url: new URL('i18n.mjs', here).href, shortCircuit: true };
   }
+  // coze-coding-dev-sdk 测试替身：防止 verify-abuse-guard 的 classify 分支真实联网
+  if (specifier === 'coze-coding-dev-sdk') {
+    return { url: new URL('coze-sdk.mjs', here).href, shortCircuit: true };
+  }
   // 业务代码里的相对导入 ../i18n → src/i18n/index.ts（依赖 JSON import attributes，Node 下不可用）
   if (specifier === '../i18n' || specifier === './i18n') {
     return { url: new URL('i18n.mjs', here).href, shortCircuit: true };

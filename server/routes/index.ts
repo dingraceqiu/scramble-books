@@ -4,6 +4,7 @@ import { glmAvailable, glmChat, glmModelName, extractJson } from '../lib/glm';
 import { authRouter, adminRouter, getAdminKey } from './auth';
 import { syncRouter } from './sync';
 import * as cloudDb from '../lib/cloudDb';
+import { glmGuard, rejectJson, validateBatchItems } from '../lib/abuseGuard';
 
 const router = Router();
 
@@ -63,20 +64,24 @@ router.get('/api/health', (_req, res) => {
  * body: { title, author?, subjects?（EPUB dc:subject/dc:type）, language? }
  * 返回 { bookType: BookType|null, source, evidence, coverUrl?, description? }
  * bookType 为 null 表示无法确认，前端落为「其他」。
+ * TD-06 防滥用：频率/日额度/并发守卫 + 字段截断（拒绝发生在 GLM 上游调用之前）。
  */
-router.post('/api/classify-book', async (req, res) => {
+router.post('/api/classify-book', glmGuard('classify-book'), async (req, res) => {
   const body = (req.body ?? {}) as {
     title?: unknown;
     author?: unknown;
     subjects?: unknown;
     language?: unknown;
   };
-  const title = typeof body.title === 'string' ? body.title : '';
-  const author = typeof body.author === 'string' ? body.author : '';
+  const title = typeof body.title === 'string' ? body.title.trim().slice(0, 300) : '';
+  const author = typeof body.author === 'string' ? body.author.trim().slice(0, 300) : '';
   const subjects = Array.isArray(body.subjects)
-    ? body.subjects.filter((s): s is string => typeof s === 'string')
+    ? body.subjects
+        .filter((s): s is string => typeof s === 'string')
+        .slice(0, 50)
+        .map((s) => s.slice(0, 200))
     : [];
-  const language = typeof body.language === 'string' ? body.language : undefined;
+  const language = typeof body.language === 'string' ? body.language.slice(0, 20) : undefined;
 
   try {
     const result = await classifyBook(
@@ -122,25 +127,20 @@ function titleGrounded(title: string, text: string): boolean {
  * body: { items: [{ id, text, coreSentence?, bookType? }] }
  * - text 是单元原文（作者原文，AI 只读不改）；标题铁律：claim 必须被原文支撑，绝不编造。
  * - 每次最多 8 条（批量一次请求），文本各截断至 1500 字控制 token。
+ * - TD-06 防滥用：守卫（429）→ items 校验（400/413）→ GLM；被拒请求不触达上游。
  * 返回 { results: [{ id, title }], generator }；GLM 未配置或失败时返回 ok:false，前端保留 mock 标题。
  */
-router.post('/api/ai-titles', async (req, res) => {
+router.post('/api/ai-titles', glmGuard('ai-titles'), async (req, res) => {
   if (!glmAvailable()) {
     res.json({ ok: false, error: 'GLM_API_KEY 未配置', results: [] });
     return;
   }
-  const body = (req.body ?? {}) as { items?: unknown };
-  const items = Array.isArray(body.items) ? body.items : [];
-  const cleaned = items
-    .slice(0, 8)
-    .map((it, idx) => {
-      const o = (it ?? {}) as Record<string, unknown>;
-      const text = typeof o.text === 'string' ? o.text.slice(0, 1500) : '';
-      const core = typeof o.coreSentence === 'string' ? o.coreSentence.slice(0, 200) : '';
-      const bookType = typeof o.bookType === 'string' ? o.bookType : '';
-      return text.trim() ? { id: String(o.id ?? idx), text, core, bookType } : null;
-    })
-    .filter((x): x is { id: string; text: string; core: string; bookType: string } => x !== null);
+  const v = validateBatchItems(req.body, 'ai-titles');
+  if (v.status !== null) {
+    rejectJson(res, v.status, v.status === 400 ? 'bad_request' : 'payload_too_large', v.message ?? '请求不合法');
+    return;
+  }
+  const cleaned = v.items ?? [];
 
   if (cleaned.length === 0) {
     res.json({ ok: false, error: '没有有效文本', results: [] });
@@ -196,23 +196,20 @@ router.post('/api/ai-titles', async (req, res) => {
  * 知识点抽取（GLM）。
  * body: { items: [{ id, text }] } — text 是【已读】原文（只考已读内容的硬规则由前端保证）。
  * 铁律：quote 必须是原文逐字摘录；concept/explanation 不得引入原文没有的 claim。
+ * TD-06 防滥用：守卫（429）→ items 校验（400/413）→ GLM；被拒请求不触达上游。
  * 返回 { results: [{ id, concept, explanation, quote }], generator }；失败时 ok:false（前端走本地兜底）。
  */
-router.post('/api/knowledge-points', async (req, res) => {
+router.post('/api/knowledge-points', glmGuard('knowledge-points'), async (req, res) => {
   if (!glmAvailable()) {
     res.json({ ok: false, error: 'GLM_API_KEY 未配置', results: [] });
     return;
   }
-  const body = (req.body ?? {}) as { items?: unknown };
-  const items = Array.isArray(body.items) ? body.items : [];
-  const cleaned = items
-    .slice(0, 6)
-    .map((it, idx) => {
-      const o = (it ?? {}) as Record<string, unknown>;
-      const text = typeof o.text === 'string' ? o.text.slice(0, 2500) : '';
-      return text.trim() ? { id: String(o.id ?? idx), text } : null;
-    })
-    .filter((x): x is { id: string; text: string } => x !== null);
+  const v = validateBatchItems(req.body, 'knowledge-points');
+  if (v.status !== null || v.items === null) {
+    rejectJson(res, v.status ?? 400, v.status === 413 ? 'payload_too_large' : 'bad_request', v.message ?? '请求不合法');
+    return;
+  }
+  const cleaned = v.items;
 
   if (cleaned.length === 0) {
     res.json({ ok: false, error: '没有有效文本', results: [] });

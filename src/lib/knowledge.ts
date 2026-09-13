@@ -9,7 +9,7 @@
  * - AI 是编辑不是作者：GLM 只做抽取，quote 校验不过关就丢弃；GLM 不可用时本地兜底；
  * - Mastery 由 Attempts 推导，绝不存单一总分。
  */
-import { apiUrl } from './cloudApi';
+import { apiUrl, getStoredToken } from './cloudApi';
 import { putKnowledgePoints } from './db';
 import { isRangeCovered } from './readState';
 import type { NodeSpan } from './readState';
@@ -149,13 +149,22 @@ async function requestServerKps(
   batch: KpWindow[],
 ): Promise<Array<{ window: KpWindow; concept: string; explanation: string; quote?: string; generator: string }> | null> {
   try {
+    // 云端登录用户带上 token：服务端按用户而非 IP 计入防滥用额度；本地匿名用户不带
+    const token = getStoredToken();
     const resp = await fetch(apiUrl('/api/knowledge-points'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({
         items: batch.map((w) => ({ id: windowKey(w), text: w.text.slice(0, 2500) })),
       }),
     });
+    if (resp.status === 429) {
+      // 被限流：本批走本地兜底，不中断后续批次（后续请求也会被快速拒绝，不触达 GLM）
+      return null;
+    }
     if (!resp.ok) return null;
     const data = (await resp.json()) as { ok?: boolean; generator?: string; results?: ServerKp[] };
     if (!data.ok || !Array.isArray(data.results)) return null;

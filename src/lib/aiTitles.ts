@@ -5,11 +5,13 @@
  * AI 标题替换本地 mock 标题并回写 IndexedDB。任何失败都静默降级——
  * 保留 mock 标题，绝不阻塞导入、绝不丢数据。
  */
-import { apiUrl } from './cloudApi';
+import { apiUrl, getStoredToken } from './cloudApi';
 import { putUnit } from './db';
 import type { BookType, ReadingUnit } from '../types';
 
 const BATCH_SIZE = 6;
+/** 与服务端 /api/ai-titles 的单项截断上限一致：客户端先截，减小上传体积 */
+const ITEM_TEXT_CHARS = 1500;
 
 /** 防重入：同一本书同时只跑一个生成任务 */
 const inflight = new Set<string>();
@@ -48,18 +50,27 @@ async function requestBatch(
   bookType: BookType,
 ): Promise<ReadingUnit[]> {
   try {
+    // 云端登录用户带上 token：服务端按用户而非 IP 计入防滥用额度；本地匿名用户不带
+    const token = getStoredToken();
     const resp = await fetch(apiUrl('/api/ai-titles'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({
         items: batch.map((u) => ({
           id: u.id,
-          text: u.sourceText,
+          text: u.sourceText?.slice(0, ITEM_TEXT_CHARS),
           coreSentence: u.coreSentence,
           bookType,
         })),
       }),
     });
+    if (resp.status === 429) {
+      // 被限流：抛出让整本书的剩余批次停止，避免继续撞限额
+      throw new Error('rate limited');
+    }
     if (!resp.ok) return [];
     const data = (await resp.json()) as {
       ok?: boolean;
