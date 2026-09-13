@@ -111,3 +111,26 @@ nginx 70m 是反向代理通行上限；Express parser 为 70mb，业务快照�
 1. `curl http://129.204.30.165/scramble-books/api/auth/me` 返回 HTML/404 而非 `{"error":"未登录"}` → 路由被冲；
 2. 比对 `/etc/nginx/project-locations/scramble-books.conf` 与仓库 `ops/nginx/ip-location.conf`；
 3. 只重新安装 Scramble Books fragment，执行 `nginx -t` 后 reload。
+
+## GLM 代理接口防滥用（TD-06，2026-09-14 落地）
+
+`/api/ai-titles`、`/api/knowledge-points`、`/api/classify-book` 经 `server/lib/abuseGuard.ts` 多层守卫：
+
+- **桶**：登录会话 → `user:<id>`；本机回环直连（轮换探针）→ probe 独立小桶；其余 → 客户端 IP 哈希桶。`trust proxy: 'loopback'` 只信任本机 nginx，伪造 `X-Forwarded-For` 不能换桶。
+- **默认阈值**（全部可用环境变量覆盖，无需密钥；按需在 unit `Environment=` 追加）：
+
+  | 环境变量 | 默认 | 含义 |
+  |---|---|---|
+  | `GLM_GUARD_RATE_PER_MIN` | 30 | 每桶每分钟请求数 |
+  | `GLM_GUARD_DAILY_PER_BUCKET` | 400 | 每桶每日额度（UTC 日界） |
+  | `GLM_GUARD_DAILY_GLOBAL` | 3000 | 全局每日 GLM 硬上限（含探针） |
+  | `GLM_GUARD_CONCURRENCY_PER_BUCKET` | 4 | 每桶并发 |
+  | `GLM_GUARD_CONCURRENCY_GLOBAL` | 16 | 全局并发 |
+  | `GLM_GUARD_PROBE_RATE_PER_MIN` | 6 | 探针桶每分钟 |
+  | `GLM_GUARD_PROBE_DAILY` | 20 | 探针桶每日 |
+  | `GLM_AI_TITLES_MAX_ITEMS` / `GLM_AI_TITLES_ITEM_CHARS` / `GLM_AI_TITLES_TOTAL_CHARS` | 8 / 1500 / 20000 | 标题接口 item 数/单项字符/总字符 |
+  | `GLM_KP_MAX_ITEMS` / `GLM_KP_ITEM_CHARS` / `GLM_KP_TOTAL_CHARS` | 6 / 2500 / 20000 | KP 接口 item 数/单项字符/总字符 |
+
+- **拒绝语义**：429（频率/日额度/并发，带 `Retry-After`）、413（请求体超 128kb/128kb/64kb 或总字符超限）、400（item 数超限/非法 JSON）——全部稳定 JSON `{ok:false,error,code}`，且**被拒请求不触达 GLM 上游**。前端遇 429 静默降级（mock 标题/本地 KP），本地匿名模式不受任何影响。
+- **限流状态为单进程内存态**：重启即重置。日志只输出接口/限制类型/桶哈希/计数，无正文与 IP。
+- **回归**：`pnpm verify:abuse-guard`（57 项断言，已入 `pnpm verify` 与 Verify CI）。

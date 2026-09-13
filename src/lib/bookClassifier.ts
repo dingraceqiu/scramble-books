@@ -1,5 +1,5 @@
 import type { BookType } from '../types';
-import { apiUrl } from './cloudApi';
+import { apiUrl, getStoredToken } from './cloudApi';
 
 /**
  * 书籍类型在线分类客户端（走自己的 Express 后端，后端再聚合 Google Books + 通用搜索）。
@@ -64,9 +64,14 @@ export async function classifyBookOnline(input: {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
   try {
+    // 云端登录用户带上 token：服务端按用户而非 IP 计入防滥用额度；本地匿名用户不带
+    const token = getStoredToken();
     const res = await fetch(apiUrl('/api/classify-book'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({
         title,
         author: author || undefined,
