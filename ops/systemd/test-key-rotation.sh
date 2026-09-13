@@ -12,6 +12,12 @@
 #   G. cleanup 拒绝路径：服务未运行 / 确认词不符 → 零删除
 #   H. 危险路径注入全部拒绝：SB_TEST_ROOT=/ 、逃逸到 /etc、相对路径逃逸、
 #      符号链接逃逸（canary 零删除）、生产模式 SB_* 注入、空变量、空 SB_TEST_ROOT
+#   I. 重复 apply：与当前 unit 一致的副本复用（inode 不变），重试成功
+#   J. 重复 apply：内容不同的副本拒绝覆盖（副本/unit/envfile 均不变）
+#   K. journalctl 本身执行失败 → 按验证失败回滚（绝不误判零命中）
+#   L. GLM HTTP 500 + ok=true 对抗用例 → 仍判失败并回滚
+#   M. 轮换窗口内权限漂移（envfile 644）→ 验证失败并回滚
+#   N. cleanup 发现 unit 缺 UMask/EnvironmentFile 配置 → 拒绝（零删除）
 #
 # 用法（root，或 GitHub runner 的 sudo）：
 #   sudo bash test-key-rotation.sh <scramble-books-key-rotation.sh>
@@ -100,6 +106,10 @@ case "$cmd" in
       touch "$S/restart_failed_once"
       exit 1
     fi
+    # 权限漂移注入：重启同时把 envfile 改成 644，模拟轮换窗口内的权限异常
+    if [ -n "${SBF_PERMS_DRIFT:-}" ] && [ -n "${SB_ENVFILE:-}" ]; then
+      chmod 644 "$SB_ENVFILE"
+    fi
     echo up > "$S/state"
     exit 0
     ;;
@@ -142,6 +152,9 @@ case "$url" in
   */api/ai-titles)
     if [ -n "${SBF_GLM_FAIL:-}" ]; then
       printf '{"ok":false,"error":"GLM HTTP 503"}\n200'
+    elif [ -n "${SBF_GLM_HTTP500:-}" ]; then
+      # 对抗用例：非 200 但 body 声称成功——必须仍判失败
+      printf '{"ok":true,"results":[{"id":"probe","title":"x"}]}\n500'
     else
       printf '{"ok":true,"results":[{"id":"probe","title":"x"}],"generator":"glm-4-flash"}\n200'
     fi
@@ -157,6 +170,10 @@ EOF
   cat > "$BIN/journalctl" <<'EOF'
 #!/usr/bin/env bash
 echo "journalctl $*" >> "$SB_STATE/cmd.log"
+if [ -n "${SBF_JOURNAL_FAIL:-}" ]; then
+  # 模拟 journalctl 本身执行失败（无输出、非零退出）
+  exit 1
+fi
 if [ -n "${SBF_JOURNAL_LEAK:-}" ]; then
   printf 'Sep 13 sudo[9]: root : COMMAND=/usr/bin/tee %s' "$GLMKEY"
 else
@@ -290,6 +307,7 @@ assert_contains "$(cat "$T/envfile")" "$TESTKEY" "envfile 含新密钥"
 assert_eq "$(stat -Lc '%a' "$T/envfile")" "600" "envfile 权限 0600"
 assert_eq "$(stat -Lc '%a' "$T/data/cloud.db")" "600" "cloud.db 0600"
 assert_eq "$(stat -Lc '%a' "$T/data/cloud.db-wal")" "600" "wal 0600"
+assert_eq "$(stat -Lc '%a' "$T/data/cloud.db-shm")" "600" "shm 0600"
 assert_eq "$(stat -Lc '%a' "$T/data/cloud.db.bak-20260908-pre-v2")" "600" "旧 bak 0600"
 assert_key_absent_from_logs "$STATE" "$TESTKEY"
 assert_contains "$(cat "$T/out.log")" "撤销旧密钥" "提示撤销旧密钥"
@@ -465,6 +483,100 @@ set_danger_defaults
 D_TEST_MODE="true"
 rc=$(run_danger cleanup "YES")
 assert_eq "$rc" "2" "SB_TEST_MODE=true（非 1）→ 拒绝"
+
+# ---- Case I：重复 apply——相同回滚副本复用（不重写）--------------------------
+begin_case "I-重复apply复用副本"
+new_env
+export SBF_GLM_FAIL=1 # 第一次 apply 在验证阶段失败并回滚 → unit 与副本一致
+rc=$(run_script apply "$TESTKEY")
+unset SBF_GLM_FAIL
+assert_eq "$rc" "4" "首次 apply 验证失败已回滚"
+backup_file="$T/rootbackup/scramble-books.service.pre-rotation"
+inode1=$(stat -Lc '%i' "$backup_file")
+TESTKEY2="TESTKEYsecond$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+rc=$(run_script apply "$TESTKEY2")
+assert_eq "$rc" "0" "重试 apply 成功"
+inode2=$(stat -Lc '%i' "$backup_file")
+assert_eq "$inode1" "$inode2" "回滚副本被复用（inode 未变）"
+assert_contains "$(cat "$backup_file")" "$OLD_MARKER" "副本仍是轮换前内容"
+assert_contains "$(cat "$T/envfile")" "$TESTKEY2" "新密钥已生效"
+assert_contains "$(cat "$T/unit")" "$NEW_MARKER" "unit 为新配置"
+
+# ---- Case J：重复 apply——内容不同的副本拒绝覆盖 ------------------------------
+begin_case "J-重复apply拒绝覆盖"
+new_env
+rc=$(run_script apply "$TESTKEY")
+assert_eq "$rc" "0" "首次 apply 成功"
+backup_file="$T/rootbackup/scramble-books.service.pre-rotation"
+inode1=$(stat -Lc '%i' "$backup_file")
+TESTKEY2="${TESTKEY}different-second-key"
+rc=$(run_script apply "$TESTKEY2")
+assert_eq "$rc" "2" "不同副本 → 拒绝（退出码 2）"
+assert_contains "$(cat "$T/out.log")" "拒绝覆盖" "输出拒绝覆盖信息"
+assert_eq "$(stat -Lc '%i' "$backup_file")" "$inode1" "回滚副本未被重写（inode 未变）"
+assert_contains "$(cat "$backup_file")" "$OLD_MARKER" "副本仍含旧密钥内容"
+assert_contains "$(cat "$T/unit")" "$NEW_MARKER" "unit 未被改动"
+assert_contains "$(cat "$T/envfile")" "$TESTKEY" "envfile 仍是首次密钥"
+
+# ---- Case K：journalctl 执行失败 → 验证失败并回滚（绝不误判零命中）-----------
+begin_case "K-journalctl失败"
+new_env
+export SBF_JOURNAL_FAIL=1
+rc=$(run_script apply "$TESTKEY")
+unset SBF_JOURNAL_FAIL
+assert_eq "$rc" "4" "退出码（最终验证失败）"
+assert_contains "$(cat "$T/out.log")" "journalctl 执行失败" "按失败处理而非零命中"
+if cmp -s "$T/unit" "$T/rootbackup/scramble-books.service.pre-rotation"; then
+  PASS=$((PASS + 1))
+else
+  FAILED=$((FAILED + 1)); printf 'FAIL [%s] journalctl 失败后 unit 未恢复\n' "$CURRENT_CASE"
+fi
+assert_eq "$(cat "$STATE/state")" "up" "回滚后服务恢复运行"
+
+# ---- Case L：GLM HTTP 500 + ok=true → 仍判失败并回滚 -------------------------
+begin_case "L-GLM-HTTP500对抗"
+new_env
+export SBF_GLM_HTTP500=1
+rc=$(run_script apply "$TESTKEY")
+unset SBF_GLM_HTTP500
+assert_eq "$rc" "4" "退出码（最终验证失败）"
+assert_contains "$(cat "$T/out.log")" "HTTP 500, ok=true" "探针输出如实报告"
+if cmp -s "$T/unit" "$T/rootbackup/scramble-books.service.pre-rotation"; then
+  PASS=$((PASS + 1))
+else
+  FAILED=$((FAILED + 1)); printf 'FAIL [%s] HTTP 500 后 unit 未恢复\n' "$CURRENT_CASE"
+fi
+
+# ---- Case M：轮换窗口内权限漂移（envfile 644）→ 验证失败并回滚 ---------------
+begin_case "M-权限漂移"
+new_env
+export SBF_PERMS_DRIFT=1
+rc=$(run_script apply "$TESTKEY")
+unset SBF_PERMS_DRIFT
+assert_eq "$rc" "4" "退出码（最终验证失败）"
+assert_contains "$(cat "$T/out.log")" "644 root root" "验证报告了漂移后的权限"
+if cmp -s "$T/unit" "$T/rootbackup/scramble-books.service.pre-rotation"; then
+  PASS=$((PASS + 1))
+else
+  FAILED=$((FAILED + 1)); printf 'FAIL [%s] 权限漂移后 unit 未恢复\n' "$CURRENT_CASE"
+fi
+
+# ---- Case N：cleanup 发现 unit 配置异常 → 拒绝（零删除）----------------------
+begin_case "N-cleanup配置校验"
+new_env
+rc=$(run_script apply "$TESTKEY")
+assert_eq "$rc" "0" "apply 成功"
+backup_file="$T/rootbackup/scramble-books.service.pre-rotation"
+sed -i '/UMask=0077/d' "$T/unit" # 破坏 unit 的 UMask 配置
+rc=$(run_script cleanup "YES")
+assert_eq "$rc" "2" "unit 缺 UMask=0077 → 拒绝清理"
+assert_path_exists "$backup_file" "拒绝后回滚文件仍在"
+# 恢复 UMask、破坏 EnvironmentFile 行
+printf 'UMask=0077\n' >> "$T/unit"
+sed -i '/EnvironmentFile=\/etc\/default\/scramble-books/d' "$T/unit"
+rc=$(run_script cleanup "YES")
+assert_eq "$rc" "2" "unit 缺 EnvironmentFile → 拒绝清理"
+assert_path_exists "$backup_file" "拒绝后回滚文件仍在"
 
 printf '\n测试结果: PASS=%d FAIL=%d\n' "$PASS" "$FAILED"
 [ "$FAILED" -eq 0 ]
