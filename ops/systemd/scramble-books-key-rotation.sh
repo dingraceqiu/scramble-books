@@ -16,7 +16,7 @@
 #           绝不出现在任何子进程的命令行参数中（journal 扫描经环境变量传给 awk）。
 # 回滚副本：轮换前 unit（含旧密钥）存入 root-only 0700 目录、文件 0600，
 #           逐步校验，任何失败都在修改 unit 之前终止；旧密钥撤销后 cleanup 删除。
-# 回滚语义：启动失败或最终验证（GLM 探针重试 3 次仍需 HTTP 200 且 ok=true /
+# 回滚语义：启动失败或最终验证（GLM 探针重试 3 次、以 generator 字段为成功哨兵 /
 #           journalctl 失败也按失败处理 / journal 命中 / 权限 / 进程环境）任一失败，
 #           都恢复旧 unit + daemon-reload + restart + 复核旧服务恢复。
 # 副本复用：已存在与当前 unit 一致的回滚副本（失败重试场景）时复用不重写；
@@ -259,13 +259,18 @@ run_verification() {
   log "  ${APP_URL} 页面                 → $code (期望 200)"
   [ "$code" = "200" ] || ok=0
 
-  # GLM 真实探针：重试 3 次（间隔 5s）吸收上游瞬时错误/新密钥生效延迟/限流；
-  # 必须同时满足 HTTP 200 与 ok=true；只输出 HTTP 状态、布尔与最终脱敏错误类别，
-  # 不打印响应正文
+  # GLM 真实探针：重试 3 次（间隔 5s）。
+  # 判定哨兵 = 响应中的 generator 字段：它只在「GLM 上游调用成功且返回可解析数组」
+  # 的成功路径存在；所有失败路径（密钥无效/限流/未配置/无法解析）均无该字段，
+  # 死密钥不可能通过。
+  # 不要以 ok=true 为必要条件——GLM 对探针的假 id（"probe"）经常返回索引式 id
+  # （如 "0"），应用按 id 关联原文时会把结果静默丢弃（ok:false 且无 error 字段），
+  # 这是探针 payload 的固有特性，不代表密钥或 GLM 有问题（2026-09-13 三次 apply
+  # 误回滚的根因）。
+  # 只输出 HTTP 状态、generator 与脱敏错误类别，不打印响应正文。
   glm_ok=false
   glm_code="000"
   glm_cat=""
-  glm_attempt=0
   for glm_attempt in 1 2 3; do
     resp=$($CURL -s -w '\n%{http_code}' --max-time 70 -X POST -H 'Content-Type: application/json' \
       --data-binary @- "$GLM_URL" <<'JSON'
@@ -274,17 +279,18 @@ JSON
     ) || resp=$'\n000'
     glm_code="${resp##*$'\n'}"
     body="${resp%$'\n'*}"
-    if printf '%s' "$body" | grep -q '"ok":true'; then
+    if printf '%s' "$body" | grep -q '"generator":"'; then
+      glm_gen=$(printf '%s' "$body" | grep -o '"generator":"[^"]*"' | head -1 | sed 's/.*:"//; s/"$//')
       glm_ok=true
-      log "  GLM 探针 (第 $glm_attempt/3 次)     → HTTP $glm_code, ok=true"
+      log "  GLM 探针 (第 $glm_attempt/3 次)     → HTTP $glm_code, generator=$glm_gen ✅"
       break
     fi
     glm_cat=$(printf '%s' "$body" | grep -o '"error":"[^"]*"' | head -1 | sed 's/^"error":"//; s/"$//' | sed -E 's/[A-Za-z0-9._-]{20,}/[REDACTED]/g' | cut -c1-120)
-    log "  GLM 探针 (第 $glm_attempt/3 次)     → HTTP $glm_code, ok=false"
+    log "  GLM 探针 (第 $glm_attempt/3 次)     → HTTP $glm_code, generator 缺失"
     if [ "$glm_attempt" -lt 3 ]; then $SLEEP 5; fi
   done
   if [ "$glm_ok" != "true" ]; then
-    log "  GLM 探针失败类别（脱敏）            → ${glm_cat:-无 error 字段}"
+    log "  GLM 探针失败类别（脱敏）            → ${glm_cat:-无 error 字段（GLM 调用未到达成功路径）}"
     ok=0
   fi
 

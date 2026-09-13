@@ -16,6 +16,9 @@
 #   J. 重复 apply：内容不同的副本拒绝覆盖（副本/unit/envfile 均不变）
 #   K. journalctl 本身执行失败 → 按验证失败回滚（绝不误判零命中）
 #   L. GLM HTTP 500 + ok=true 对抗用例 → 仍判失败并回滚
+#   O. GLM 瞬态失败（前 2 次 429，第 3 次成功）→ 重试通过
+#   P. GLM 调用成功但 id 回显不匹配（ok:false 无 error、generator 存在）
+#      → 探针以 generator 哨兵判定通过，不误回滚
 #   M. 轮换窗口内权限漂移（envfile 644）→ 验证失败并回滚
 #   N. cleanup 发现 unit 缺 UMask/EnvironmentFile 配置 → 拒绝（零删除）
 #
@@ -162,6 +165,10 @@ case "$url" in
     elif [ -n "${SBF_GLM_FAIL_FIRST:-}" ] && [ "$calls" -le "${SBF_GLM_FAIL_FIRST}" ]; then
       # 瞬态用例：前 N 次失败，之后成功——验证重试逻辑
       printf '{"ok":false,"error":"GLM HTTP 429"}\n429'
+    elif [ -n "${SBF_GLM_IDECHO:-}" ]; then
+      # id 回显用例：GLM 调用成功但结果被应用按 id 过滤丢弃（ok:false 无 error 字段，
+      # generator 存在）——探针必须以 generator 为哨兵判定通过
+      printf '{"ok":false,"results":[],"generator":"glm-4-flash"}\n200'
     else
       printf '{"ok":true,"results":[{"id":"probe","title":"x"}],"generator":"glm-4-flash"}\n200'
     fi
@@ -374,7 +381,7 @@ else
 fi
 assert_contains "$(cat "$T/out.log")" "已回滚" "输出回滚成功信息"
 assert_contains "$(cat "$T/out.log")" "不要撤销旧密钥" "提示暂缓撤销"
-assert_contains "$(cat "$T/out.log")" "ok=false" "GLM 探针只输出布尔"
+assert_contains "$(cat "$T/out.log")" "generator 缺失" "探针按 generator 哨兵判失败"
 assert_contains "$(cat "$T/out.log")" "GLM 探针失败类别" "输出脱敏错误类别"
 if printf '%s' "$(cat "$T/out.log")" | grep -q '{"ok":false'; then
   FAILED=$((FAILED + 1)); printf 'FAIL [%s] 输出泄漏了 GLM 响应正文\n' "$CURRENT_CASE"
@@ -548,8 +555,8 @@ export SBF_GLM_HTTP500=1
 rc=$(run_script apply "$TESTKEY")
 unset SBF_GLM_HTTP500
 assert_eq "$rc" "4" "退出码（最终验证失败）"
-assert_contains "$(cat "$T/out.log")" "HTTP 500, ok=false" "探针输出如实报告"
-assert_eq "$(grep -c 'ok=false' "$T/out.log")" "3" "重试了 3 次"
+assert_contains "$(cat "$T/out.log")" "HTTP 500, generator 缺失" "探针输出如实报告"
+assert_eq "$(grep -c 'generator 缺失' "$T/out.log")" "3" "重试了 3 次"
 if cmp -s "$T/unit" "$T/rootbackup/scramble-books.service.pre-rotation"; then
   PASS=$((PASS + 1))
 else
@@ -563,9 +570,21 @@ export SBF_GLM_FAIL_FIRST=2
 rc=$(run_script apply "$TESTKEY")
 unset SBF_GLM_FAIL_FIRST
 assert_eq "$rc" "0" "重试后 apply 成功"
-assert_contains "$(cat "$T/out.log")" "(第 3/3 次)     → HTTP 200, ok=true" "第 3 次成功"
+assert_contains "$(cat "$T/out.log")" "(第 3/3 次)     → HTTP 200, generator=glm-4-flash ✅" "第 3 次成功"
 assert_contains "$(cat "$T/unit")" "$NEW_MARKER" "unit 为新配置（未回滚）"
 assert_contains "$(cat "$T/envfile")" "$TESTKEY" "新密钥生效"
+
+# ---- Case P：GLM 调用成功但 id 回显不匹配（ok:false 无 error，generator 存在）
+#              → 探针以 generator 为哨兵判定通过，不误回滚 ---------------------
+begin_case "P-id回显丢弃不误判"
+new_env
+export SBF_GLM_IDECHO=1
+rc=$(run_script apply "$TESTKEY")
+unset SBF_GLM_IDECHO
+assert_eq "$rc" "0" "generator 哨兵判定通过（退出码 0）"
+assert_contains "$(cat "$T/out.log")" "generator=glm-4-flash ✅" "输出 generator 哨兵"
+assert_contains "$(cat "$T/unit")" "$NEW_MARKER" "unit 为新配置"
+assert_contains "$(cat "$T/out.log")" "撤销旧密钥" "正常走完 apply 流程"
 
 # ---- Case M：轮换窗口内权限漂移（envfile 644）→ 验证失败并回滚 ---------------
 begin_case "M-权限漂移"
