@@ -80,6 +80,18 @@ curl -i http://129.204.30.165/scramble-books/api/auth/me   # 期望 JSON 401，�
 
 nginx 70m 是反向代理通行上限；Express parser 为 70mb，业务快照硬上限为 60MiB。不要把 nginx 值降到 60m：HTTP envelope 和单位差异需要余量。
 
+## GLM 密钥管理与轮换（2026-09-13 加固）
+
+- **密钥唯一来源**：`/etc/default/scramble-books`（root:root `0600`），经 systemd `EnvironmentFile=` 注入。**禁止**在 unit 内联 `Environment=GLM_API_KEY=...`——sudo 审计会把命令行送进 journald（2026-09 预检已确认发生过，共 2 行命中，撤销旧密钥后自然失效）。
+- **unit 变更**：`UMask=0077`——服务新建文件（含 SQLite WAL/SHM）默认仅属主可读写；`cloud.db/-wal/-shm` 与旧 `cloud.db.bak-*` 均保持 `0600`。
+- **共享父目录不动**：`/home/ubuntu/apps/data` 权限保持现状，可能被其他项目使用，须先盘点全部消费者再议（2026-09-13 决策留档）。
+- **轮换工具**：服务器 `/usr/local/sbin/scramble-books-key-rotation`（root `0700`；事实源 = 仓库 `ops/systemd/scramble-books-key-rotation.sh`）。三个子命令：
+  - `apply`：隐藏输入新密钥（不进对话/命令行/日志）→ 轮换前 unit 备份到 `/root/scramble-books-rotation/`（0700 目录、0600 文件）→ 写 envfile → 更新 unit → 收紧 DB → `daemon-reload` + 受控重启 → 全量验证（health / auth-me / 页面 / 真实 GLM 探针只输出状态与布尔 / 密钥卫生计数 / journal 增量零命中）。启动失败自动回滚；任一验证失败退出码非零。
+  - `verify`：只验证当前状态，不需要密钥。
+  - `cleanup`：**旧密钥在 GLM 控制台撤销成功之后**执行，删除含旧密钥的回滚副本。
+- **顺序纪律**：apply 验证全绿 → 控制台撤销旧密钥 → cleanup。验证未全绿（退出码 4）时**禁止**撤销旧密钥。
+- **故障注入测试**：`sudo bash ops/systemd/test-key-rotation.sh ops/systemd/scramble-books-key-rotation.sh`——覆盖 restart 立即失败、服务延迟退出、GLM 探针失败、journal 泄漏拦截与回滚成功，全部在 `/tmp` 隔离环境，不触碰真实 systemd/数据库。
+
 ## 服务器共享与协作规则（2026-09-07 事故留档，2026-09-08 已完成架构隔离）
 
 **历史根因**：`/scramble-books/` 曾寄生在 FinReport 的精确 IP `server` 块里，FinReport 部署整体重写该文件，2026-09-07 因此发生过两次 API 404，2026-09-08 又暴露过 413 上限漂移。

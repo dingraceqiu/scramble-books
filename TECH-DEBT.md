@@ -86,3 +86,9 @@ Layer 2 曾抓到真实缺陷：loadAll 对**未合并/乱序**的存量 readRan
 6. **TD-01 目标判定** ✓ —— `isRangeCovered` 已能直接表达 KP 范围级 eligibility。
 
 **真书 GUI 纵切（导入 → 切分 → Feed 阅读 → Reader → 重开 → 重切分 → Study → 答题 → 跳回原文 → 同步恢复）仍需人工用 2–3 本结构差异大的真实书执行**，自动化脚本只覆盖纯逻辑层。
+
+## TD-06 — GLM 代理接口公网无鉴权，存在滥用与费用风险（2026-09-13 留档，密钥轮换后单独处理）
+
+- **现状**：`/api/ai-titles`、`/api/knowledge-points`、`/api/classify-book`（server/routes/index.ts）均为**无登录态**的公网 POST，逐字消耗 GLM 配额；恶意脚本可无限刷。glm-4-flash 当前免费，但配额耗尽会让真实用户功能降级为本地 mock，且升级付费模型后直接变成账单风险。
+- **处置约定**：2026-09-13 密钥轮换**不**顺手改接口（变更面隔离）；轮换完成后单独一轮处理。最低成本方案：express-rate-limit 按 IP 限流 + 每日总量上限；更完整方案：登录态校验（复用 `/api/auth` 会话）+ 限流双闸。
+- **轮换工具耦合警告**：`scramble-books-key-rotation` 的 GLM 探针依赖 `/api/ai-titles` 无鉴权可调。将来加鉴权/限流时，必须同步给探针放行路径（如仅对 `127.0.0.1` 回环来源豁免或提供探针专用凭据），否则轮换验证会假阴性（exit 4）。
