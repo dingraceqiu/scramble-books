@@ -128,11 +128,13 @@ nginx 70m 是反向代理通行上限；Express parser 为 70mb，业务快照�
   | `GLM_GUARD_CONCURRENCY_GLOBAL` | 16 | 全局并发 |
   | `GLM_GUARD_PROBE_RATE_PER_MIN` | 6 | 探针桶每分钟 |
   | `GLM_GUARD_PROBE_DAILY` | 20 | 探针桶每日 |
+  | `GLM_GUARD_MAX_MINUTE_BUCKETS` / `GLM_GUARD_MAX_DAY_BUCKETS` | 16384 / 8192 | 分钟窗/日计数的桶容量上界（见下方容量治理） |
   | `GLM_AI_TITLES_MAX_ITEMS` / `GLM_AI_TITLES_ITEM_CHARS` / `GLM_AI_TITLES_TOTAL_CHARS` | 8 / 1500 / 20000 | 标题接口 item 数/单项字符/总字符 |
   | `GLM_KP_MAX_ITEMS` / `GLM_KP_ITEM_CHARS` / `GLM_KP_TOTAL_CHARS` | 6 / 2500 / 20000 | KP 接口 item 数/单项字符/总字符 |
 
 - **拒绝语义**：429（频率/每桶日额度/并发，带 `Retry-After`）、413（请求体超 128kb/128kb/64kb 或总字符超限）、400（item 数超限/非法 JSON）——全部稳定 JSON `{ok:false,error,code}`，且**被拒请求不触达 GLM 上游**。前端遇 429 静默降级（mock 标题/本地 KP），本地匿名模式不受任何影响。
+- **限流计数口径（准确描述）**：桶级频率/日额度/并发覆盖**进入业务路由**的全部请求（含业务层 400/413）。请求体超限 413 与 JSON 解析 400 发生在 express body-parser（router/guard **之前**），**不计入桶级限流**——它们不解析完整请求体、不触达业务逻辑与 GLM，单请求成本为常数；nginx 当前未配置 request-rate 限速，若要在 body 洪泛层再加一道 IP gate 属于独立 hardening。
 - **全局额度语义**：`GLM_GUARD_DAILY_GLOBAL` 是真实 GLM 调用预算，统一在 `glmChat()` 入口、fetch 上游之前消耗（上游失败也算一次 attempt）；额度耗尽时所有调用方（含轮换探针）诚实降级，零上游调用。桶级限流/日额度仍按请求数计数用于抗滥用。
-- **内存卫生**：分钟窗/日计数 Map 带低频 TTL 清扫（每 5 分钟或超 4096 条触发），恶意唯一 IP 洪峰不会让内存无限增长。
+- **容量治理（bounded memory）**：分钟窗/日计数 Map 有硬容量上界（上界内**绝不淘汰任何 bucket**，活跃用户计数不会被容量治理重置）；达到上界后新唯一 bucket 落入共享 overflow 计数（O(1)，按标准桶级限额共享）；过期条目仅在分钟窗/UTC 日翻转时做一次 O(n) 清扫（每分钟/每天至多一次），平时请求全部 O(1)；全局 GLM 预算为独立变量，结构上不可被容量淘汰。恶意唯一 IP 洪峰下内存与 CPU 均有确定上界。
 - **限流状态为单进程内存态**：重启即重置。日志只输出接口/限制类型/桶哈希/计数，无正文与 IP。
-- **回归**：`pnpm verify:abuse-guard`（57 项断言，已入 `pnpm verify` 与 Verify CI）。
+- **回归**：`pnpm verify:abuse-guard`（81 项断言，已入 `pnpm verify` 与 Verify CI）。
