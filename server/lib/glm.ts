@@ -7,16 +7,25 @@
  * （分类走规则投票 / 标题走本地 mock），绝不阻塞主流程。
  */
 
+import { consumeGlmCallBudget } from './abuseGuard';
+
 const GLM_ENDPOINT = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
-const GLM_API_KEY = (process.env.GLM_API_KEY || '').trim();
-const GLM_MODEL = (process.env.GLM_MODEL || 'glm-4-flash-250414').trim();
+
+/** 密钥/模型惰性读取：测试可在同进程切换「未配置」场景 */
+function apiKey(): string {
+  return (process.env.GLM_API_KEY || '').trim();
+}
+
+function modelName(): string {
+  return (process.env.GLM_MODEL || 'glm-4-flash-250414').trim();
+}
 
 export function glmAvailable(): boolean {
-  return GLM_API_KEY.length > 0;
+  return apiKey().length > 0;
 }
 
 export function glmModelName(): string {
-  return GLM_MODEL;
+  return modelName();
 }
 
 interface GlmMessage {
@@ -27,12 +36,20 @@ interface GlmMessage {
 /**
  * 调用 GLM chat 接口，返回首条回复文本。
  * 网络异常/限流/鉴权失败统一抛错，由调用方决定降级策略。
+ *
+ * 全局每日 GLM 调用预算（GLM_GUARD_DAILY_GLOBAL）在此统一 consume：
+ * 这是所有 GLM 上游请求的公共入口，fetch 前消耗（上游失败也计一次 attempt），
+ * 额度耗尽在 fetch 之前抛错——零上游调用，各调用方（含轮换探针）诚实降级。
  */
 export async function glmChat(
   messages: GlmMessage[],
   opts: { temperature?: number; timeoutMs?: number; maxTokens?: number } = {},
 ): Promise<string> {
   if (!glmAvailable()) throw new Error('GLM_API_KEY 未配置');
+  const budget = consumeGlmCallBudget();
+  if (!budget.ok) {
+    throw new Error(`GLM 全局每日调用额度已用完，请 ${budget.retryAfterSec} 秒后再试`);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 45000);
   try {
@@ -40,10 +57,10 @@ export async function glmChat(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${GLM_API_KEY}`,
+        Authorization: `Bearer ${apiKey()}`,
       },
       body: JSON.stringify({
-        model: GLM_MODEL,
+        model: modelName(),
         messages,
         temperature: opts.temperature ?? 0.3,
         max_tokens: opts.maxTokens ?? 1024,

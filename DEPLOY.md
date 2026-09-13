@@ -123,7 +123,7 @@ nginx 70m 是反向代理通行上限；Express parser 为 70mb，业务快照�
   |---|---|---|
   | `GLM_GUARD_RATE_PER_MIN` | 30 | 每桶每分钟请求数 |
   | `GLM_GUARD_DAILY_PER_BUCKET` | 400 | 每桶每日额度（UTC 日界） |
-  | `GLM_GUARD_DAILY_GLOBAL` | 3000 | 全局每日 GLM 硬上限（含探针） |
+  | `GLM_GUARD_DAILY_GLOBAL` | 3000 | 全局每日 GLM **真实调用**预算（由 `glmChat()` 在 fetch 上游前统一消耗；400/413/未配置/不走 GLM 的请求不消耗，上游失败计一次 attempt） |
   | `GLM_GUARD_CONCURRENCY_PER_BUCKET` | 4 | 每桶并发 |
   | `GLM_GUARD_CONCURRENCY_GLOBAL` | 16 | 全局并发 |
   | `GLM_GUARD_PROBE_RATE_PER_MIN` | 6 | 探针桶每分钟 |
@@ -131,6 +131,8 @@ nginx 70m 是反向代理通行上限；Express parser 为 70mb，业务快照�
   | `GLM_AI_TITLES_MAX_ITEMS` / `GLM_AI_TITLES_ITEM_CHARS` / `GLM_AI_TITLES_TOTAL_CHARS` | 8 / 1500 / 20000 | 标题接口 item 数/单项字符/总字符 |
   | `GLM_KP_MAX_ITEMS` / `GLM_KP_ITEM_CHARS` / `GLM_KP_TOTAL_CHARS` | 6 / 2500 / 20000 | KP 接口 item 数/单项字符/总字符 |
 
-- **拒绝语义**：429（频率/日额度/并发，带 `Retry-After`）、413（请求体超 128kb/128kb/64kb 或总字符超限）、400（item 数超限/非法 JSON）——全部稳定 JSON `{ok:false,error,code}`，且**被拒请求不触达 GLM 上游**。前端遇 429 静默降级（mock 标题/本地 KP），本地匿名模式不受任何影响。
+- **拒绝语义**：429（频率/每桶日额度/并发，带 `Retry-After`）、413（请求体超 128kb/128kb/64kb 或总字符超限）、400（item 数超限/非法 JSON）——全部稳定 JSON `{ok:false,error,code}`，且**被拒请求不触达 GLM 上游**。前端遇 429 静默降级（mock 标题/本地 KP），本地匿名模式不受任何影响。
+- **全局额度语义**：`GLM_GUARD_DAILY_GLOBAL` 是真实 GLM 调用预算，统一在 `glmChat()` 入口、fetch 上游之前消耗（上游失败也算一次 attempt）；额度耗尽时所有调用方（含轮换探针）诚实降级，零上游调用。桶级限流/日额度仍按请求数计数用于抗滥用。
+- **内存卫生**：分钟窗/日计数 Map 带低频 TTL 清扫（每 5 分钟或超 4096 条触发），恶意唯一 IP 洪峰不会让内存无限增长。
 - **限流状态为单进程内存态**：重启即重置。日志只输出接口/限制类型/桶哈希/计数，无正文与 IP。
 - **回归**：`pnpm verify:abuse-guard`（57 项断言，已入 `pnpm verify` 与 Verify CI）。

@@ -5,8 +5,10 @@
  * 多层限制（全部内存态，单进程；重启即重置，属可接受的软状态）：
  * 1. 每桶每分钟请求数（固定分钟窗）；
  * 2. 每桶每日请求数（UTC 日界）；
- * 3. 全局每日 GLM 调用硬上限（含探针，额度耗尽时探针诚实失败）；
- * 4. 每桶并发数 + 全局并发数；
+ * 3. 桶级/全局并发数；
+ * 4. 全局每日 GLM 真实调用预算（dailyGlobal）——由 glmChat() 在 fetch 上游前统一
+ *    consume（见 consumeGlmCallBudget），请求级拒绝/未配置/不走 GLM 的路径不消耗，
+ *    额度耗尽时含探针在内的所有调用方诚实失败；
  * 5. 轮换探针（本机回环直连、无代理链）独立小额度桶——外部无法命中该桶：
  *    - 经 nginx 进来的请求，nginx 会在 X-Forwarded-For 末尾追加真实 IP，
  *      trust proxy 'loopback' 取最右侧非可信地址 → 永远不是回环；
@@ -84,6 +86,15 @@ export function resetAbuseGuardForTests(): void {
   minuteWindows.clear();
   dayCounters.clear();
   concurrency.clear();
+  lastSweepAt = 0;
+}
+
+/** 仅测试使用：暴露内部计数 Map，供 GC 回归注入/检查 stale 条目 */
+export function __abuseGuardInternalsForTests(): {
+  minuteWindows: Map<string, WindowCounter>;
+  dayCounters: Map<string, DayCounter>;
+} {
+  return { minuteWindows, dayCounters };
 }
 
 // ---------- 状态 ----------
@@ -203,6 +214,7 @@ export function glmGuard(endpoint: GlmEndpoint): (req: Request, res: Response, n
     const bucket = bucketForRequest(req);
     const isProbe = bucket === 'probe';
     const now = Date.now();
+    maybeSweepStale(now);
 
     // 1. 每分钟频率（探针独立阈值）
     const rate = bumpMinute(`${bucket}:rate`, isProbe ? config.probeRatePerMin : config.ratePerMin, now);
@@ -212,7 +224,9 @@ export function glmGuard(endpoint: GlmEndpoint): (req: Request, res: Response, n
       return;
     }
 
-    // 2. 每桶每日额度（探针独立小额度）
+    // 2. 每桶每日额度（探针独立小额度）。注意：这里只计「请求数」用于抗滥用，
+    //    全局每日 GLM 真实调用预算（dailyGlobal）由 glmChat() 在 fetch 上游前统一 consume，
+    //    400/413/未配置/classify 不走 GLM 的请求不计入真实调用额度。
     const daily = bumpDay(`${bucket}:day`, isProbe ? config.probeDaily : config.dailyPerBucket, now);
     if (!daily.ok) {
       logReject(endpoint, 'daily_bucket', bucket, 429, daily.count);
@@ -220,15 +234,7 @@ export function glmGuard(endpoint: GlmEndpoint): (req: Request, res: Response, n
       return;
     }
 
-    // 3. 全局每日 GLM 硬上限（含探针——全局额度耗尽时探针诚实失败）
-    const global = bumpDay('global:day', config.dailyGlobal, now);
-    if (!global.ok) {
-      logReject(endpoint, 'daily_global', bucket, 429, global.count);
-      rejectJson(res, 429, 'global_quota_exceeded', '服务今日调用量已达上限，请明天再试', global.retryAfterSec);
-      return;
-    }
-
-    // 4. 并发（桶级 + 全局）
+    // 3. 并发（桶级 + 全局）
     const bucketConcKey = `${bucket}:conc`;
     if (!tryAcquireConcurrency(bucketConcKey, config.concurrencyPerBucket)) {
       logReject(endpoint, 'concurrency_bucket', bucket, 429, config.concurrencyPerBucket);
@@ -259,6 +265,49 @@ export function glmGuard(endpoint: GlmEndpoint): (req: Request, res: Response, n
 function logReject(endpoint: string, limit: string, bucket: string, status: number, count: number): void {
   // 桶已哈希：绝不输出完整 IP / 正文 / token / 密钥
   console.log(`[abuse-guard] endpoint=${endpoint} limit=${limit} bucket=${bucket} status=${status} count=${count}`);
+}
+
+// ---------- 全局每日 GLM 真实调用预算（由 glmChat() 在 fetch 上游前 consume） ----------
+
+/**
+ * 消耗一次全局每日 GLM 调用预算（config.dailyGlobal）。
+ * 唯一调用点是 glmChat()（所有 GLM 上游请求的公共入口），保证：
+ * - 请求级拒绝（429/413/400）、GLM 未配置、classify 元数据命中等
+ *   「不会真正调用 GLM」的路径绝不消耗全局额度；
+ * - consume 成功后才 fetch 上游——上游失败也算一次 attempt；
+ * - 额度耗尽在 fetch 之前抛出（零上游调用），含轮换探针在内的所有调用方诚实失败。
+ */
+export function consumeGlmCallBudget(): { ok: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  maybeSweepStale(now);
+  const r = bumpDay('global:day', config.dailyGlobal, now);
+  return { ok: r.ok, retryAfterSec: r.retryAfterSec };
+}
+
+// ---------- stale bucket GC（低复杂度 TTL 清扫，防唯一 IP 撑爆内存） ----------
+
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+/** 超过该规模立即清扫，不等间隔（恶意唯一 IP 洪峰兜底） */
+const SWEEP_SIZE_THRESHOLD = 4096;
+let lastSweepAt = 0;
+
+/** 清扫过期桶：分钟窗保留 2 分钟内的；日计数只保留今天（global:day 由 bumpDay 按日翻新）。 */
+export function sweepStaleBuckets(now: number): void {
+  const today = dayKeyUtc(now);
+  for (const [k, w] of minuteWindows) {
+    if (now - w.winStart > 2 * 60000) minuteWindows.delete(k);
+  }
+  for (const [k, d] of dayCounters) {
+    if (k !== 'global:day' && d.day !== today) dayCounters.delete(k);
+  }
+  lastSweepAt = now;
+}
+
+function maybeSweepStale(now: number): void {
+  if (now - lastSweepAt < SWEEP_INTERVAL_MS && minuteWindows.size + dayCounters.size < SWEEP_SIZE_THRESHOLD) {
+    return;
+  }
+  sweepStaleBuckets(now);
 }
 
 // ---------- 内容校验（413/400，全部发生在 GLM 上游调用之前） ----------
