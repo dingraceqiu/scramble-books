@@ -79,7 +79,8 @@
     "cancelReduce": "Undo",
     "undoReduce": "Undo reduce",
     "continueEpisode": "Continue the story",
-    "episode": "Ep. {{count}}"
+    "episode": "Ep. {{count}}",
+    "bookProgress": "{{pct}}% of book"
   },
   "readerMenu": {
     "highlight": "Highlight",
@@ -259,7 +260,9 @@
     "errPasswordShort": "Password must be at least 6 characters",
     "errPasswordMismatch": "Passwords do not match",
     "errInviteRequired": "Invite code is required",
-    "errGeneric": "Something went wrong, please try again"
+    "errGeneric": "Something went wrong, please try again",
+    "exportLog": "Export reading log (JSON)",
+    "exportLogHint": "Local-only product-verification data; stored in this browser only"
   },
   "quiz": {
     "sectionTitle": "Knowledge & Quiz",
@@ -276,5 +279,9 @@
     "evidence": "Source evidence",
     "viewSource": "View original text",
     "recallQuestion": "Regarding \"{{concept}}\", which sentence is the author's original wording?"
+  },
+  "completion": {
+    "chapterDone": "Finished \"{{chapter}}\"",
+    "coverage": "{{pct}}% of this chapter read"
   }
 }

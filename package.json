@@ -19,8 +19,10 @@
     "verify:cloud-snapshot": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-cloud-snapshot.ts",
     "verify:cloud-backup": "tsx scripts/verify-cloud-backup.ts",
     "verify:abuse-guard": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-abuse-guard.mts",
+    "verify:segment-smoke": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-segment-smoke.ts",
+    "verify:dogfood": "node --import ./scripts/test-shims/register.mjs --import tsx scripts/verify-dogfood.ts",
     "diagnose:snapshot": "tsx scripts/diagnose-cloud-snapshot.ts",
-    "verify": "pnpm verify:readstate && pnpm verify:persistence && pnpm verify:quiz-leakage && pnpm verify:kp-invariance && pnpm verify:cloud-snapshot && pnpm verify:cloud-backup && pnpm verify:abuse-guard",
+    "verify": "pnpm verify:readstate && pnpm verify:persistence && pnpm verify:quiz-leakage && pnpm verify:kp-invariance && pnpm verify:cloud-snapshot && pnpm verify:cloud-backup && pnpm verify:abuse-guard && pnpm verify:segment-smoke && pnpm verify:dogfood",
     "invite": "node scripts/invite.mjs"
   },
   "dependencies": {

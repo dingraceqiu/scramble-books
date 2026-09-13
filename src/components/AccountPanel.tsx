@@ -1,8 +1,43 @@
 import { useEffect, useRef, useState } from 'react';
-import { User, Loader2, LogOut, Cloud, RefreshCw, AlertCircle } from 'lucide-react';
+import { User, Loader2, LogOut, Cloud, RefreshCw, AlertCircle, Download } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '../store/useAuth';
 import { pullCloudData, pushNow, clearLocalData, rehydrateAfterPull } from '../lib/sync';
+import { exportDogfoodJson } from '../lib/dogfood';
+
+/** 导出 dogfood 阅读行为日志（本地 JSON 文件，仅产品验证用） */
+function ExportLogButton() {
+  const { t } = useTranslation();
+  const onClick = async () => {
+    try {
+      const json = await exportDogfoodJson();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dogfood-log-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* 导出失败静默 */
+    }
+  };
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <button
+        type="button"
+        onClick={() => void onClick()}
+        className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-line py-2 text-xs font-medium text-muted transition-colors hover:border-accent hover:text-accent"
+      >
+        <Download size={13} />
+        {t('account.exportLog')}
+      </button>
+      <p className="mt-1.5 text-center text-[10px] leading-relaxed text-muted/80">
+        {t('account.exportLogHint')}
+      </p>
+    </div>
+  );
+}
 
 type Tab = 'login' | 'register';
 
@@ -197,6 +232,7 @@ function PanelContent({ onClose }: { onClose: () => void }) {
             </button>
           </div>
         )}
+        <ExportLogButton />
       </div>
     );
   }
@@ -291,6 +327,8 @@ function PanelContent({ onClose }: { onClose: () => void }) {
       <p className="mt-3 text-center text-[11px] leading-relaxed text-muted">
         {t('account.inviteHint')}
       </p>
+
+      <ExportLogButton />
     </div>
   );
 }

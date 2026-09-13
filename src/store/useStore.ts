@@ -42,6 +42,8 @@ import { SAMPLE_FILENAME, SAMPLE_TEXT } from '../lib/sample';
 import { uid } from '../lib/utils';
 import { classifyBookOnline, type OnlineClassifyResult } from '../lib/bookClassifier';
 import { generateAiTitlesForBook } from '../lib/aiTitles';
+import { dfLog } from '../lib/dogfood';
+import { checkChapterCompletion } from '../lib/chapterCompletion';
 import i18n from '../i18n';
 
 export interface ProcessingTask {
@@ -49,6 +51,12 @@ export interface ProcessingTask {
   name: string;
   status: 'parsing' | 'segmenting' | 'done' | 'error';
   message?: string;
+}
+
+/** Feed 离开时的现场（滚动位置 / 已加载卡片数），返回 Feed 时恢复 */
+export interface FeedState {
+  visibleCount: number;
+  scrollY: number;
 }
 
 /**
@@ -94,6 +102,12 @@ interface StoreState {
   filter: FeedFilter;
   search: string;
   feedSeed: number;
+  /** Feed 离开现场（null = 无需恢复）；只在 Feed 与 Reader 之间往返时使用 */
+  feedState: FeedState | null;
+  saveFeedState: (s: FeedState | null) => void;
+  /** 弹层「回到原文」前的单元：从 Reader 返回 Feed 时恢复该弹层（用后即清） */
+  pendingModalUnitId: string | null;
+  setPendingModalUnitId: (id: string | null) => void;
 
   readerId: string | null;
   readerQueue: string[];
@@ -129,7 +143,7 @@ interface StoreState {
   /** 启动时后台升级：把仍是本地 mock 的标题批量换成 GLM 生成的真 AI 标题 */
   upgradeAiTitles: () => void;
 
-  openReader: (unitId: string, queue?: string[]) => void;
+  openReader: (unitId: string, queue?: string[], source?: 'feed' | 'study' | 'library') => void;
   closeReader: () => void;
   nextUnit: () => void;
   /** 同书顺序下一篇（读完一章接着读下一章，绝不跳书） */
@@ -198,6 +212,9 @@ interface StoreState {
 /** 正在重切分的书 id（防重入：同一本书重切期间忽略后续类型切换点击） */
 let retypingBookId: string | null = null;
 
+/** Reader 整页打开时刻（dogfood：本次连续阅读时长） */
+let readerOpenedAt = 0;
+
 export const useStore = create<StoreState>((set, get) => ({
   hydrated: false,
   books: [],
@@ -214,6 +231,10 @@ export const useStore = create<StoreState>((set, get) => ({
   filter: 'all',
   search: '',
   feedSeed: 0,
+  feedState: null,
+  saveFeedState: (s) => set({ feedState: s }),
+  pendingModalUnitId: null,
+  setPendingModalUnitId: (id) => set({ pendingModalUnitId: id }),
 
   readerId: null,
   readerQueue: [],
@@ -508,7 +529,17 @@ export const useStore = create<StoreState>((set, get) => ({
 
   // 打开弹层不再自动计为已读：滚到底（弹层内 handleScroll）才写入已读区间，
   // 避免「点进去看了一眼就退出」白白消耗未读状态。
-  openReader: (unitId, queue) => {
+  openReader: (unitId, queue, source = 'feed') => {
+    const unit = get().units.find((u) => u.id === unitId);
+    if (unit) {
+      // dogfood：Feed→Reader 是核心转化路径；generator 区分真 AI / mock 标题
+      dfLog('feed_open_reader', {
+        unitId,
+        bookId: unit.bookId,
+        source,
+        generator: unit.ai?.generator ?? '',
+      });
+    }
     set({ readerId: unitId, readerQueue: queue ?? [unitId] });
   },
   closeReader: () => set({ readerId: null, readerQueue: [] }),
@@ -591,6 +622,14 @@ export const useStore = create<StoreState>((set, get) => ({
       readerDoc: doc,
       readerReturnView: opts?.returnView ?? 'library',
     });
+    // dogfood：Reader 打开位置（上下文回跳是否真的被使用）
+    readerOpenedAt = Date.now();
+    dfLog('reader_open', {
+      bookId,
+      anchorChapterId: anchor?.chapterId ?? null,
+      anchorNode: anchor?.nodeIndex ?? null,
+      returnView: opts?.returnView ?? 'library',
+    });
     // 阅读页是整页滚动的独立视图，等待渲染后滚动到锚点
     requestAnimationFrame(() => {
       if (anchor) {
@@ -603,6 +642,11 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   closeBookReader: () => {
+    const bookId = get().readerBookId;
+    if (bookId && readerOpenedAt > 0) {
+      dfLog('reader_close', { bookId, durationMs: Date.now() - readerOpenedAt });
+      readerOpenedAt = 0;
+    }
     set((s) => ({
       view: s.readerReturnView,
       readerBookId: null,
@@ -659,7 +703,9 @@ export const useStore = create<StoreState>((set, get) => ({
     const cur = progress[bookId] ?? { bookId, readRanges: [], readUnitIds: [], updatedAt: 0 };
     const merged = mergeReadRanges([...cur.readRanges, ...incoming]);
     // 覆盖没有扩大时不写库不触发渲染（Reader 滚动会频繁上报已见节点）
-    if (coveredNodeCount(merged) <= coveredNodeCount(cur.readRanges)) return;
+    const before = coveredNodeCount(cur.readRanges);
+    const after = coveredNodeCount(merged);
+    if (after <= before) return;
     const bookUnits = units.filter((u) => u.bookId === bookId);
     const next: ReadingProgress = {
       bookId,
@@ -669,6 +715,19 @@ export const useStore = create<StoreState>((set, get) => ({
     };
     void db.putProgress(next);
     set((s) => ({ progress: { ...s.progress, [bookId]: next } }));
+    // dogfood：新增已读原文节点数（via 区分 Feed 弹层 / Reader 连续阅读）
+    dfLog('read_ranges_added', {
+      bookId,
+      via: incoming[0]?.via ?? 'reader',
+      nodes: after - before,
+    });
+    // 章节完成感检查（轻提示，每会话每章最多一次；内部有阈值与静默兜底）
+    const touched = new Map<string, number>();
+    for (const r of incoming) {
+      const prev = touched.get(r.chapterId);
+      touched.set(r.chapterId, Math.max(prev ?? -1, r.endNode));
+    }
+    void checkChapterCompletion(bookId, touched, merged);
   },
 
   toggleFavorite: (unitId) => {
@@ -804,6 +863,7 @@ export const useStore = create<StoreState>((set, get) => ({
     };
     void db.putQuizAttempts([attempt]);
     set((s) => ({ quizAttempts: [...s.quizAttempts, attempt] }));
+    dfLog('quiz_answer', { level: attempt.level, correct: attempt.correct });
   },
 }));
 

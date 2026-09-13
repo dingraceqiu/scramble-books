@@ -3,7 +3,7 @@ import { RefreshCw, Search, Upload } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/useStore';
 import { recommend } from '../lib/recommender';
-import { buildRangesByChapter, coveredNodeCount, isUnitRead } from '../lib/readState';
+import { buildRangesByChapter, coverageOfNodes, coveredNodeCount, isUnitRead } from '../lib/readState';
 import { FeedCard } from './FeedCard';
 import { BrandLogo } from './icons/Logo';
 import type { FeedFilter, ReadingUnit } from '../types';
@@ -36,10 +36,57 @@ export function Feed() {
   const {
     books, units, progress, marks, filter, search, feedSeed,
     setFilter, setSearch, reshuffle, setView, openReader,
-    toggleFavorite, feedback,
+    toggleFavorite, feedback, saveFeedState,
   } = useStore();
 
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  // —— Feed 现场恢复（Feed ↔ Reader 往返不丢滚动位置与阅读状态）——
+  // 注意：StrictMode 下 effect 会「挂载→清理→重放」一次，因此：
+  // 1) 恢复动作放在不被 cleanup 取消的定时器里（内部再校验当前视图）；
+  // 2) 现场保存不在卸载 cleanup 里做（假卸载会用 scrollY=0 覆盖真实现场），
+  //    而是滚动时持续保存。
+  const restoredRef = useRef(false);
+  const [visibleCount, setVisibleCount] = useState(
+    () => useStore.getState().feedState?.visibleCount ?? PAGE_SIZE,
+  );
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    const { feedState, pendingModalUnitId, setPendingModalUnitId } = useStore.getState();
+    saveFeedState(null);
+    setPendingModalUnitId(null);
+    if (!feedState && !pendingModalUnitId) return;
+    window.setTimeout(() => {
+      // 定时器触发时若已不在 Feed（用户快速切走）则放弃恢复
+      if (useStore.getState().view !== 'feed' || useStore.getState().readerId) return;
+      if (feedState && feedState.scrollY > 0) window.scrollTo({ top: feedState.scrollY });
+      if (
+        pendingModalUnitId &&
+        useStore.getState().units.some((u) => u.id === pendingModalUnitId)
+      ) {
+        openReader(pendingModalUnitId, [pendingModalUnitId], 'feed');
+      }
+    }, 90);
+  }, []);
+
+  // 滚动时持续保存现场（防抖；feedState 不被组件订阅，不触发多余渲染）
+  const leaveStateRef = useRef({ visibleCount });
+  leaveStateRef.current = { visibleCount };
+  useEffect(() => {
+    let timer: number | null = null;
+    const onScroll = () => {
+      if (timer != null) return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        saveFeedState({ visibleCount: leaveStateRef.current.visibleCount, scrollY: window.scrollY });
+      }, 400);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [saveFeedState]);
+
   const sentinelRef = useRef<HTMLDivElement>(null);
   const columnCount = useColumnCount();
 
@@ -84,8 +131,13 @@ export function Feed() {
     });
   }, [units, marks, filter, search, readSet, bookMap, feedSeed, progress]);
 
-  // 切换筛选 / 搜索 / 换一批时回到首批
+  // 切换筛选 / 搜索 / 换一批时回到首批（跳过挂载后首次执行，避免覆盖恢复的现场）
+  const firstFilterRun = useRef(true);
   useEffect(() => {
+    if (firstFilterRun.current) {
+      firstFilterRun.current = false;
+      return;
+    }
     setVisibleCount(PAGE_SIZE);
   }, [filter, search, feedSeed]);
 
@@ -118,6 +170,15 @@ export function Feed() {
     visible.forEach((unit, i) => cols[i % columnCount].push({ unit, gi: i }));
     return cols;
   }, [visible, columnCount]);
+
+  // 每本书的全书阅读位置（0~100）：卡片上下文行用，帮助建立「我在哪里」的空间感
+  const coverageByBook = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const b of books) {
+      map.set(b.id, Math.round(coverageOfNodes(progress[b.id]?.readRanges, b.nodeCount) * 100));
+    }
+    return map;
+  }, [books, progress]);
 
   if (books.length === 0) {
     return (
@@ -209,7 +270,9 @@ export function Feed() {
                     read={readSet.has(unit.id)}
                     favorited={!!marks.favorites[unit.id]}
                     feedback={marks.unitFeedback[unit.id]}
-                    onOpen={() => openReader(unit.id, ordered.map((u) => u.id))}
+                    chapterLabel={unit.sourceStart?.chapterTitle || unit.headingText || undefined}
+                    bookCoveragePct={coverageByBook.get(unit.bookId)}
+                    onOpen={() => openReader(unit.id, ordered.map((u) => u.id), 'feed')}
                     onFavorite={() => toggleFavorite(unit.id)}
                     onFeedback={(dir) => feedback(unit.id, dir)}
                   />

@@ -1,8 +1,11 @@
+import { useEffect, useRef } from 'react';
 import { Clock, EyeOff, Heart } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { Book, ReadingUnit } from '../types';
 import { formatReadingMinutes } from '../lib/utils';
 import { sanitizeTitleQuotes } from '../lib/titleGen';
+import { dfLog, isQuickSkip } from '../lib/dogfood';
+import { useStore } from '../store/useStore';
 
 interface Props {
   unit: ReadingUnit;
@@ -11,6 +14,10 @@ interface Props {
   favorited: boolean;
   feedback: 1 | -1 | undefined;
   index: number;
+  /** 章节上下文（来自 Canonical Source 的章节标题），空则不显示 */
+  chapterLabel?: string;
+  /** 全书阅读位置 0~100（rounded），undefined 则不显示 */
+  bookCoveragePct?: number;
   onOpen: () => void;
   onFavorite: () => void;
   onFeedback: (dir: 1 | -1) => void;
@@ -26,6 +33,8 @@ export function FeedCard({
   favorited,
   feedback,
   index,
+  chapterLabel,
+  bookCoveragePct,
   onOpen,
   onFavorite,
   onFeedback,
@@ -34,8 +43,52 @@ export function FeedCard({
   const muted = feedback === -1;
   const coverBg = COVER_BG[index % COVER_BG.length];
 
+  // —— dogfood：卡片驻留测量 ——
+  // 进入视口开始计时，离开视口（或打开弹层）结束：驻留 < 1.5s 视为快速跳过。
+  const cardRef = useRef<HTMLElement>(null);
+  const enterRef = useRef<number | null>(null);
+  const readerId = useStore((s) => s.readerId);
+
+  const logDwell = () => {
+    if (enterRef.current == null) return;
+    const dwell = Date.now() - enterRef.current;
+    enterRef.current = null;
+    dfLog('feed_card_viewed', {
+      unitId: unit.id,
+      bookId: unit.bookId,
+      dwellMs: dwell,
+      quickSkip: isQuickSkip(dwell),
+      generator: unit.ai?.generator ?? '',
+    });
+  };
+
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && enterRef.current == null) enterRef.current = Date.now();
+          else if (!e.isIntersecting) logDwell();
+        }
+      },
+      { threshold: 0.5 },
+    );
+    io.observe(el);
+    return () => {
+      io.disconnect();
+      logDwell();
+    };
+  }, [unit.id]);
+
+  // 弹层打开会盖住 Feed：此时结束该卡片的驻留测量，避免把阅读时长算进浏览驻留
+  useEffect(() => {
+    if (readerId) logDwell();
+  }, [readerId]);
+
   return (
     <article
+      ref={cardRef}
       onClick={onOpen}
       className="animate-fade-up mb-3.5 cursor-pointer break-inside-avoid overflow-hidden rounded-2xl bg-surface shadow-card ring-1 ring-line transition-all duration-300 hover:-translate-y-1 hover:shadow-lift sm:mb-4"
       style={{ animationDelay: `${Math.min(index % 12, 12) * 35}ms` }}
@@ -71,8 +124,26 @@ export function FeedCard({
           {unit.preview}
         </p>
 
+        {/* 上下文定位行：我在书里的哪里（只建立空间感，不压过正文） */}
+        {(chapterLabel || bookCoveragePct !== undefined) && (
+          <div className="mt-2.5 flex items-center gap-1.5 truncate text-[11px] text-muted/90">
+            {chapterLabel && (
+              <span className="truncate">
+                <span aria-hidden className="mr-1 text-muted/60">§</span>
+                {chapterLabel}
+              </span>
+            )}
+            {chapterLabel && bookCoveragePct !== undefined && (
+              <span aria-hidden className="shrink-0 text-muted/50">·</span>
+            )}
+            {bookCoveragePct !== undefined && (
+              <span className="shrink-0 tabular-nums">{t('card.bookProgress', { pct: bookCoveragePct })}</span>
+            )}
+          </div>
+        )}
+
         {/* 来源行 */}
-        <div className="mt-3 truncate text-[12px] text-muted">
+        <div className="mt-1.5 truncate text-[12px] text-muted">
           {book?.title ?? t('common.unknownBook')}
           {book?.author && book.author !== '未知作者' && book.author !== 'Unknown author'
             ? ` · ${book.author}`

@@ -496,15 +496,11 @@ export function ReaderView() {
     </div>
   );
 
-  /** 回到 Feed 瀑布流（发现入口） */
+  /** 回到 Feed 瀑布流（发现入口）。走 closeBookReader 以正确记录本次阅读时长 */
   const goToFeed = useCallback(() => {
-    useStore.setState({
-      view: 'feed',
-      readerBookId: null,
-      readerAnchor: null,
-      readerDoc: null,
-    });
-  }, []);
+    closeBookReader();
+    useStore.setState({ view: 'feed' });
+  }, [closeBookReader]);
 
   if (!book || !doc || !bookId) {
     // 兜底：书籍/文档缺失时给可返回的空状态，而不是整块白屏

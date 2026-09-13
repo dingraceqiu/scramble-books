@@ -23,7 +23,7 @@ export function ReaderModal() {
   const {
     readerId, units, books, progress, highlights, notes, marks,
     closeReader, nextUnit, nextUnitInBook, markRead, snoozeUnit, setPartialRead,
-    toggleFavorite, feedback, openBookReader,
+    toggleFavorite, feedback, openBookReader, setPendingModalUnitId,
     addHighlight, removeHighlight, addNote, removeNote,
   } = useStore();
 
@@ -228,6 +228,8 @@ export function ReaderModal() {
                 const target = units.find((u) => u.id === id);
                 closeReader();
                 if (target) {
+                  // 记住当前弹层：从 Reader 返回 Feed 时自动恢复到这一篇
+                  setPendingModalUnitId(id);
                   void openBookReader(target.bookId, {
                     anchor: {
                       chapterId: target.sourceStart.chapterId,

@@ -8,6 +8,8 @@ import { Library } from './components/Library';
 import { Study } from './components/Study';
 import { ReaderModal } from './components/ReaderModal';
 import { ReaderView } from './components/ReaderView';
+import { CompletionToast } from './components/CompletionToast';
+import { beginDogfoodSession } from './lib/dogfood';
 import { startSyncSubscriptions, pullCloudData, rehydrateAfterPull } from './lib/sync';
 
 export default function App() {
@@ -20,6 +22,18 @@ export default function App() {
     bootRef.current = true;
     void (async () => {
       await hydrate();
+      // dogfood session：记录阅读连续性（上次读的书 / 位置 / 覆盖率），本地保存
+      const { books, progress, units } = useStore.getState();
+      const last = Object.values(progress)
+        .filter((p) => p.updatedAt > 0 && books.some((b) => b.id === p.bookId))
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      beginDogfoodSession({
+        books: books.length,
+        lastBookId: last?.bookId ?? null,
+        lastBookTitle: books.find((b) => b.id === last?.bookId)?.title ?? null,
+        lastReadUnitCount: last?.readUnitIds.length ?? 0,
+        units: units.length,
+      });
       // 订阅本地数据变更（云端模式下自动防抖推送）；订阅在会话恢复前挂上，
       // 但 schedulePush 内部会检查 mode==='cloud'，未登录时不会发请求。
       startSyncSubscriptions();
@@ -60,6 +74,7 @@ export default function App() {
         <Feed />
       )}
       <ReaderModal />
+      <CompletionToast />
     </Shell>
   );
 }

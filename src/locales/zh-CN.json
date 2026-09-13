@@ -79,7 +79,12 @@
     "cancelReduce": "取消「减少推荐」",
     "undoReduce": "恢复推荐",
     "continueEpisode": "继续追更",
-    "episode": "第 {{count}} 篇"
+    "episode": "第 {{count}} 篇",
+    "bookProgress": "全书 {{pct}}%"
+  },
+  "completion": {
+    "chapterDone": "「{{chapter}}」已读完",
+    "coverage": "本章覆盖 {{pct}}%"
   },
   "library": {
     "title": "我的书库",
@@ -259,7 +264,9 @@
     "errPasswordShort": "密码至少 6 位",
     "errPasswordMismatch": "两次输入的密码不一致",
     "errInviteRequired": "请输入邀请码",
-    "errGeneric": "操作失败，请稍后重试"
+    "errGeneric": "操作失败，请稍后重试",
+    "exportLog": "导出阅读日志（JSON）",
+    "exportLogHint": "本机产品验证数据，仅保存在浏览器中，导出后可自行查看"
   },
   "quiz": {
     "sectionTitle": "知识点与测验",

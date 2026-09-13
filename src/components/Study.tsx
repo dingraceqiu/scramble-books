@@ -5,6 +5,7 @@ import { useStore } from '../store/useStore';
 import { estimateReadingMinutes, cn } from '../lib/utils';
 import { buildRecallQuestion, masteryByLevel } from '../lib/knowledge';
 import { buildRangesByChapter } from '../lib/readState';
+import { dfLog } from '../lib/dogfood';
 import { BookCover } from './BookCover';
 
 export function Study() {
@@ -16,6 +17,11 @@ export function Study() {
   const notes = useStore((s) => s.notes);
   const openReader = useStore((s) => s.openReader);
   const openBookReader = useStore((s) => s.openBookReader);
+
+  // dogfood：Study 进入情况（是否有人在读完后想检验自己）
+  useEffect(() => {
+    dfLog('study_open');
+  }, []);
 
   const readSet = new Set(Object.values(progressMap).flatMap((p) => p.readUnitIds));
 
@@ -58,7 +64,7 @@ export function Study() {
 
   const continueBook = (entry: (typeof readingBooks)[number]) => {
     const next = entry.bookUnits.find((u) => !readSet.has(u.id)) ?? entry.bookUnits[0];
-    if (next) openReader(next.id, entry.bookUnits.map((u) => u.id));
+    if (next) openReader(next.id, entry.bookUnits.map((u) => u.id), 'study');
   };
 
   return (
@@ -148,7 +154,7 @@ export function Study() {
               <button
                 key={u.id}
                 type="button"
-                onClick={() => openReader(u.id, [u.id])}
+                onClick={() => openReader(u.id, [u.id], 'study')}
                 className="group flex items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-surface"
               >
                 <span className="shrink-0 font-mono text-[10px] tracking-[0.15em] text-muted">
@@ -322,6 +328,7 @@ function QuizSection() {
     setRound(qs);
     setQIdx(0);
     setPicked(null);
+    dfLog('quiz_start', { questions: qs.length });
   };
 
   const answer = (i: number) => {
