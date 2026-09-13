@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scramble Books GLM 密钥轮换 + systemd 加固（v3，2026-09-13）
+# Scramble Books GLM 密钥轮换 + systemd 加固（v3.1，2026-09-13）
 #
 # 用法（root）：
 #   scramble-books-key-rotation apply     # 交互式输入新密钥并执行轮换（旧密钥必须仍有效）
@@ -16,8 +16,11 @@
 #           绝不出现在任何子进程的命令行参数中（journal 扫描经环境变量传给 awk）。
 # 回滚副本：轮换前 unit（含旧密钥）存入 root-only 0700 目录、文件 0600，
 #           逐步校验，任何失败都在修改 unit 之前终止；旧密钥撤销后 cleanup 删除。
-# 回滚语义：启动失败或最终验证（GLM / journal / 权限 / 进程环境）任一失败，
+# 回滚语义：启动失败或最终验证（GLM 需 HTTP 200 且 ok=true / journalctl 失败也按
+#           失败处理 / journal 命中 / 权限 / 进程环境）任一失败，
 #           都恢复旧 unit + daemon-reload + restart + 复核旧服务恢复。
+# 副本复用：已存在与当前 unit 一致的回滚副本（失败重试场景）时复用不重写；
+#           内容不同则拒绝覆盖，绝不破坏唯一的旧密钥副本。
 #
 # 测试注入口：默认生产模式，**禁止任何 SB_* 变量**（含空值）。测试必须显式
 #   SB_TEST_MODE=1 且提供 SB_TEST_ROOT（非空、非 "/"），所有 SB_* 路径必须经
@@ -266,7 +269,10 @@ JSON
   body="${resp%$'\n'*}"
   if printf '%s' "$body" | grep -q '"ok":true'; then glm_ok=true; else glm_ok=false; fi
   log "  GLM 探针 (/api/ai-titles)      → HTTP $glm_code, ok=$glm_ok"
-  [ "$glm_ok" = "true" ] || ok=0
+  # 必须同时满足 HTTP 200 与 ok=true，缺一即失败
+  if [ "$glm_code" != "200" ] || [ "$glm_ok" != "true" ]; then
+    ok=0
+  fi
 
   # 密钥卫生：只输出计数与权限，绝不输出密钥内容
   pid=$("$SYSTEMCTL" show -p MainPID --value "$SERVICE_NAME")
@@ -283,28 +289,51 @@ JSON
   log "  unit 内联密钥行数              → $n (期望 0)"
   [ "$n" -eq 0 ] || ok=0
 
-  n=$(stat -Lc '%a' "$ENVFILE" 2>/dev/null) || n=unknown
-  log "  $ENVFILE 权限                  → $n $(stat -Lc '%U:%G' "$ENVFILE" 2>/dev/null) (期望 600 root:root)"
-  [ "$n" = "600" ] || ok=0
+  n=$(stat -Lc '%a %U %G' "$ENVFILE" 2>/dev/null) || n=unknown
+  log "  $ENVFILE 权限                  → $n (期望 600 root:root)"
+  [ "$n" = "600 root root" ] || ok=0
 
-  n=$(stat -Lc '%a' "$DB" 2>/dev/null) || n=unknown
-  log "  数据库 $DB 权限               → $n (期望 600)"
-  [ "$n" = "600" ] || ok=0
+  # DB / WAL / SHM 全量断言 0600（WAL/SHM 可能已被 checkpoint 删除，此时跳过）
+  db_bad=0
+  for dbf in "$DB" "$DB-wal" "$DB-shm"; do
+    if [ -e "$dbf" ]; then
+      n=$(stat -Lc '%a' "$dbf" 2>/dev/null) || n=unknown
+      if [ "$n" != "600" ]; then
+        log "  数据库 $dbf 权限              → $n (期望 600)"
+        db_bad=1
+      fi
+    else
+      log "  数据库 $dbf 不存在（可能已被 checkpoint，跳过）"
+    fi
+  done
+  if [ "$db_bad" -eq 0 ]; then
+    log "  数据库 DB/WAL/SHM 权限         → 均为 600 ✅"
+  else
+    ok=0
+  fi
 
   if [ -n "$newkey" ]; then
     # 新密钥重启后不得新增任何 journal 命中。
     # 注意：前缀赋值只作用于管道第一段命令，awk 取不到 ENVIRON——必须在子 shell 内
-    # export（密钥经环境变量传递，不进入任何进程 argv）。
+    # export（密钥经环境变量传递，不进入任何进程 argv）；
+    # pipefail 保证 journalctl 本身失败时按失败处理，绝不误判为零命中。
     jtmp=$(mktemp)
+    jrc=0
     (
       export GLMKEY="$newkey"
+      set -o pipefail
       $JOURNALCTL --since '-5 min' 2>/dev/null |
         awk 'index($0, ENVIRON["GLMKEY"]) { n++ } END { print n + 0 }'
-    ) > "$jtmp"
+    ) > "$jtmp" || jrc=1
     n=$(cat "$jtmp")
     rm -f -- "$jtmp"
-    log "  重启后 journal 新增密钥命中    → $n (期望 0)"
-    [ "$n" -eq 0 ] || ok=0
+    if [ "$jrc" -ne 0 ]; then
+      fail "  journalctl 执行失败——无法确认零命中，按验证失败处理"
+      ok=0
+    else
+      log "  重启后 journal 新增密钥命中    → $n (期望 0)"
+      [ "$n" -eq 0 ] || ok=0
+    fi
   fi
 
   # WAL/SHM 在 UMask=0077 下应已为 600；幂等再收紧一次
@@ -313,7 +342,10 @@ JSON
   [ "$ok" -eq 1 ]
 }
 
-# [1] 回滚副本创建：逐步校验，任何失败都在修改 unit / envfile 之前终止
+# [1] 回滚副本创建：逐步校验，任何失败都在修改 unit / envfile 之前终止。
+# 已存在副本时：与当前 unit 相同则复用（失败重试场景），不同则拒绝——绝不覆盖
+# 唯一的旧密钥回滚副本。
+BACKUP_REUSED=0
 create_backup() {
   if [ -L "$BACKUP_DIR" ]; then
     fail "回滚目录是符号链接：$BACKUP_DIR，终止"
@@ -322,6 +354,19 @@ create_backup() {
   install -d -m 700 "$BACKUP_DIR" || { fail "无法创建 $BACKUP_DIR"; return 1; }
   chown root:root "$BACKUP_DIR" || return 1
   chmod 700 "$BACKUP_DIR" || return 1
+  if [ -e "$BACKUP_FILE" ]; then
+    if [ -L "$BACKUP_FILE" ] || [ ! -f "$BACKUP_FILE" ]; then
+      fail "回滚路径已存在非普通文件：$BACKUP_FILE，终止"
+      return 1
+    fi
+    if cmp -s -- "$UNIT" "$BACKUP_FILE"; then
+      # 与当前 unit 一致（上次 apply 失败回滚后的重试）：复用，不重写
+      BACKUP_REUSED=1
+      return 0
+    fi
+    fail "已存在内容不同的回滚副本（$BACKUP_FILE），拒绝覆盖；请先排查差异"
+    return 1
+  fi
   cp -a -- "$UNIT" "$BACKUP_FILE" || { fail "无法复制 unit 到 $BACKUP_FILE"; return 1; }
   chown root:root "$BACKUP_FILE" || return 1
   chmod 600 "$BACKUP_FILE" || return 1
@@ -361,7 +406,11 @@ cmd_apply() {
     fail "回滚副本创建失败，未修改任何配置（unit/envfile 原样）"
     exit "$RC_PRECHECK"
   fi
-  log "[1/6] 已备份轮换前 unit → $BACKUP_FILE ($(stat -Lc '%a %U:%G' "$BACKUP_FILE"))"
+  if [ "$BACKUP_REUSED" -eq 1 ]; then
+    log "[1/6] 复用现有回滚副本（与当前 unit 一致）：$BACKUP_FILE"
+  else
+    log "[1/6] 已备份轮换前 unit → $BACKUP_FILE ($(stat -Lc '%a %U:%G' "$BACKUP_FILE"))"
+  fi
 
   if run_mutation; then
     log "[2/6] EnvironmentFile 已写入（root:root 0600）"
@@ -415,10 +464,18 @@ cmd_cleanup() {
     exit "$RC_PRECHECK"
   fi
 
-  # 2. 当前 unit 无内联密钥
+  # 2. 当前 unit 无内联密钥，且 EnvironmentFile / UMask 配置准确
   n=$(grep -c 'Environment=GLM_API_KEY' "$UNIT") || n=0
   if [ "$n" -ne 0 ]; then
     fail "当前 unit 仍含内联密钥行（$n），拒绝清理"
+    exit "$RC_PRECHECK"
+  fi
+  if ! grep -qF 'EnvironmentFile=/etc/default/scramble-books' "$UNIT"; then
+    fail "unit 缺少 EnvironmentFile=/etc/default/scramble-books 配置，拒绝清理"
+    exit "$RC_PRECHECK"
+  fi
+  if ! grep -qF 'UMask=0077' "$UNIT"; then
+    fail "unit 缺少 UMask=0077 配置，拒绝清理"
     exit "$RC_PRECHECK"
   fi
 
