@@ -8,7 +8,10 @@ import { setupVite } from './vite';
 
 const isDev = process.env.COZE_PROJECT_ENV !== 'PROD';
 const port = parseInt(process.env.PORT || '5000', 10);
-const hostname = process.env.HOSTNAME || 'localhost';
+// 监听面收紧（5000-hardening）：默认只绑回环——生产公网流量必须经本机 Nginx 反代
+// （proxy_pass http://127.0.0.1:5000/），不再依赖云安全组拦截直连 5000。
+// 需要对外暴露监听时显式设置 LISTEN_HOST（如局域网调试 LISTEN_HOST=0.0.0.0）。
+const listenHost = process.env.LISTEN_HOST || '127.0.0.1';
 
 async function startServer(): Promise<Server> {
   const app = createApp();
@@ -30,8 +33,8 @@ async function startServer(): Promise<Server> {
     process.exit(1);
   });
 
-  server.listen(port, () => {
-    console.log(`\n✨ Server running at http://${hostname}:${port}`);
+  server.listen(port, listenHost, () => {
+    console.log(`\n✨ Server running at http://${listenHost}:${port}`);
     console.log(`📝 Environment: ${isDev ? 'development' : 'production'}\n`);
   });
 

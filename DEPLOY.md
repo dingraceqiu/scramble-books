@@ -5,7 +5,7 @@
 ## 生产服务器（129.204.30.165）
 
 - **入口**：`http://129.204.30.165/scramble-books/`（ICP 备案过渡期走裸 IP + 二级路径；备案通过后 `https://books.gracetools.club` 的根路径与 `/scramble-books/` 均已预埋可用）
-- **架构**：systemd 服务 `scramble-books.service` 跑 Express（`/home/ubuntu/apps/scramble-books`，`dist-server/server.js`），nginx 前置代理。**后端完整**：GLM AI（标题/分类/知识点）+ 云端账号/同步（SQLite，`/home/ubuntu/apps/data/cloud.db`）
+- **架构**：systemd 服务 `scramble-books.service` 跑 Express（`/home/ubuntu/apps/scramble-books`，`dist-server/server.js`），nginx 前置代理。**监听面收紧（2026-09-14）**：Express 只绑 `127.0.0.1:5000`（server.ts 读 `LISTEN_HOST`，unit 与 rotation unit 模板均已同步），公网只能经本机 Nginx 反代进入，直连 `<ip>:5000` 不可达、不依赖云安全组。**后端完整**：GLM AI（标题/分类/知识点）+ 云端账号/同步（SQLite，`/home/ubuntu/apps/data/cloud.db`）
 - **nginx 要点**：`/scramble-books/` 代理时**剥前缀**（`proxy_pass http://127.0.0.1:5000/;` 尾斜杠）——应用内静态资源与 API 均以根路径提供服务。该项目的 IP 路由事实源是仓库内 `ops/nginx/ip-location.conf`，生产安装到 `/etc/nginx/project-locations/scramble-books.conf`；稳定网关 `/etc/nginx/sites-enabled/00-ip-gateway` 只负责 include，不由任何项目部署脚本重写。
 - **IP 根路径**是导航主页（`/var/www/index.html`，链接 Scramble Books 与 FinReport Learner）
 
