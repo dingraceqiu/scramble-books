@@ -150,11 +150,18 @@ case "$url" in
     printf '401'
     ;;
   */api/ai-titles)
+    calls_file="$SB_STATE/glm_calls"
+    calls=$(cat "$calls_file" 2>/dev/null || echo 0)
+    calls=$((calls + 1))
+    echo "$calls" > "$calls_file"
     if [ -n "${SBF_GLM_FAIL:-}" ]; then
       printf '{"ok":false,"error":"GLM HTTP 503"}\n200'
     elif [ -n "${SBF_GLM_HTTP500:-}" ]; then
       # 对抗用例：非 200 但 body 声称成功——必须仍判失败
-      printf '{"ok":true,"results":[{"id":"probe","title":"x"}]}\n500'
+      printf '{"ok":false,"error":"GLM HTTP 500"}\n500'
+    elif [ -n "${SBF_GLM_FAIL_FIRST:-}" ] && [ "$calls" -le "${SBF_GLM_FAIL_FIRST}" ]; then
+      # 瞬态用例：前 N 次失败，之后成功——验证重试逻辑
+      printf '{"ok":false,"error":"GLM HTTP 429"}\n429'
     else
       printf '{"ok":true,"results":[{"id":"probe","title":"x"}],"generator":"glm-4-flash"}\n200'
     fi
@@ -368,8 +375,9 @@ fi
 assert_contains "$(cat "$T/out.log")" "已回滚" "输出回滚成功信息"
 assert_contains "$(cat "$T/out.log")" "不要撤销旧密钥" "提示暂缓撤销"
 assert_contains "$(cat "$T/out.log")" "ok=false" "GLM 探针只输出布尔"
-if printf '%s' "$(cat "$T/out.log")" | grep -q 'GLM HTTP 503'; then
-  FAILED=$((FAILED + 1)); printf 'FAIL [%s] 输出泄漏了 GLM 响应体\n' "$CURRENT_CASE"
+assert_contains "$(cat "$T/out.log")" "GLM 探针失败类别" "输出脱敏错误类别"
+if printf '%s' "$(cat "$T/out.log")" | grep -q '{"ok":false'; then
+  FAILED=$((FAILED + 1)); printf 'FAIL [%s] 输出泄漏了 GLM 响应正文\n' "$CURRENT_CASE"
 else
   PASS=$((PASS + 1))
 fi
@@ -533,19 +541,31 @@ else
 fi
 assert_eq "$(cat "$STATE/state")" "up" "回滚后服务恢复运行"
 
-# ---- Case L：GLM HTTP 500 + ok=true → 仍判失败并回滚 -------------------------
+# ---- Case L：GLM HTTP 500（持续）→ 重试 3 次仍失败 → 回滚 --------------------
 begin_case "L-GLM-HTTP500对抗"
 new_env
 export SBF_GLM_HTTP500=1
 rc=$(run_script apply "$TESTKEY")
 unset SBF_GLM_HTTP500
 assert_eq "$rc" "4" "退出码（最终验证失败）"
-assert_contains "$(cat "$T/out.log")" "HTTP 500, ok=true" "探针输出如实报告"
+assert_contains "$(cat "$T/out.log")" "HTTP 500, ok=false" "探针输出如实报告"
+assert_eq "$(grep -c 'ok=false' "$T/out.log")" "3" "重试了 3 次"
 if cmp -s "$T/unit" "$T/rootbackup/scramble-books.service.pre-rotation"; then
   PASS=$((PASS + 1))
 else
   FAILED=$((FAILED + 1)); printf 'FAIL [%s] HTTP 500 后 unit 未恢复\n' "$CURRENT_CASE"
 fi
+
+# ---- Case O：GLM 瞬态失败（前 2 次 429，第 3 次成功）→ 重试通过 --------------
+begin_case "O-GLM瞬态重试"
+new_env
+export SBF_GLM_FAIL_FIRST=2
+rc=$(run_script apply "$TESTKEY")
+unset SBF_GLM_FAIL_FIRST
+assert_eq "$rc" "0" "重试后 apply 成功"
+assert_contains "$(cat "$T/out.log")" "(第 3/3 次)     → HTTP 200, ok=true" "第 3 次成功"
+assert_contains "$(cat "$T/unit")" "$NEW_MARKER" "unit 为新配置（未回滚）"
+assert_contains "$(cat "$T/envfile")" "$TESTKEY" "新密钥生效"
 
 # ---- Case M：轮换窗口内权限漂移（envfile 644）→ 验证失败并回滚 ---------------
 begin_case "M-权限漂移"
