@@ -22,6 +22,7 @@
  */
 import http from 'node:http';
 import assert from 'node:assert';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -71,7 +72,7 @@ function installDefaultFetchMock(): void {
 }
 
 /** 全局每日 GLM 预算计数（consumeGlmCallBudget 的真实状态） */
-const globalBudgetCount = (): number => guard.__abuseGuardInternalsForTests().dayCounters.get('global:day')?.count ?? 0;
+const globalBudgetCount = (): number => guard.__globalBudgetForTests().count;
 
 installDefaultFetchMock();
 
@@ -116,6 +117,8 @@ const textOf = (n: number): string => `${TEXT_MARKER}${'读书是把别人的思
 const titlesBody = (n: number, chars = 100) => ({ items: Array.from({ length: n }, (_, i) => ({ id: `u${i}`, text: textOf(chars) })) });
 const PROBE_BODY = { items: [{ id: 'probe', text: '读书是把别人的思考变成自己血肉的过程。读得多不如读得深，深度决定复利的利率。' }] };
 const guardDayKeyOf = (now: number): string => new Date(now).toISOString().slice(0, 10);
+/** 与服务端 hashBucket 一致：IP → 桶键（测试断言具体桶计数用） */
+const ipBucketKey = (ip: string): string => `ip:${crypto.createHash('sha256').update(ip).digest('hex').slice(0, 8)}`;
 
 let passed = 0;
 const failures: string[] = [];
@@ -299,28 +302,52 @@ guard.__configureAbuseGuardForTests({ ...guard.loadAbuseGuardConfig(), dailyGlob
   check('GLM 上游失败仍消耗该次 attempt（fetch 已发出 + 预算 +1）', upstreamFail.status === 200 && upstreamFail.body?.ok === false && globalBudgetCount() - beforeFail === 1 && glmCalls - failCallsBefore === 1);
 }
 
-// ---------- 6c. stale bucket GC ----------
+// ---------- 6c. 容量治理（bounded memory：攻击者持续制造新 IP bucket 场景） ----------
 
 {
-  const { minuteWindows, dayCounters } = guard.__abuseGuardInternalsForTests();
-  const now = Date.now();
-  minuteWindows.set('ip:deadbeef:rate', { winStart: now - 10 * 60000, count: 7 });
-  minuteWindows.set('ip:fresh1:rate', { winStart: now - 1000, count: 1 });
-  dayCounters.set('ip:stale-day:day', { day: '2020-01-01', count: 5 });
-  dayCounters.set('ip:fresh-day:day', { day: guardDayKeyOf(now), count: 2 });
-  dayCounters.set('global:day', { day: '2020-01-01', count: 9 });
-  guard.sweepStaleBuckets(now);
-  check('过期分钟窗 bucket 被清扫', !minuteWindows.has('ip:deadbeef:rate'));
-  check('活跃分钟窗 bucket 保留', minuteWindows.has('ip:fresh1:rate'));
-  check('过期日计数 bucket 被清扫', !dayCounters.has('ip:stale-day:day'));
-  check('今日日计数 bucket 保留', dayCounters.has('ip:fresh-day:day'));
-  check('global:day 不被清扫（bumpDay 按日翻新）', dayCounters.has('global:day'));
+  guard.__configureAbuseGuardForTests({ ...guard.loadAbuseGuardConfig(), maxDayBuckets: 5, maxMinuteBuckets: 4, dailyGlobal: 1000, ratePerMin: 100 });
+  const { minuteWindows, dayCounters, sweepState, overflowState } = guard.__abuseGuardInternalsForTests();
 
-  // 自动清扫：lastSweepAt 重置为 0 后，下一次守卫请求应触发 sweep
-  guard.resetAbuseGuardForTests();
-  minuteWindows.set('ip:autogc:rate', { winStart: Date.now() - 10 * 60000, count: 3 });
-  await req('/api/ai-titles', { body: titlesBody(1), xff: '10.60.1.1' });
-  check('守卫请求自动触发 stale 清扫', !minuteWindows.has('ip:autogc:rate'));
+  // 1) 同一天创建远超阈值的唯一 daily bucket → Map size 有确定上限
+  for (let i = 0; i < 20; i++) {
+    await req('/api/ai-titles', { body: titlesBody(1), xff: `10.61.${i}.1` });
+  }
+  check('同一天 20 个唯一 IP bucket 后 dayCounters 收敛到确定上限', dayCounters.size === 5);
+  check('容量满后新 bucket 落入共享 overflow 计数（不占 Map 槽位）', overflowState.day !== null);
+
+  // 2) 上限后连续新 bucket 请求不再触发每请求 O(n) 全表扫描
+  const s1 = guard.__sweepStatsForTests();
+  for (let i = 0; i < 30; i++) {
+    await req('/api/ai-titles', { body: titlesBody(1), xff: `10.62.${i}.1` });
+  }
+  const s2 = guard.__sweepStatsForTests();
+  check('容量满后 30 个新 bucket 请求零 day sweep（无每请求全表扫描）', s2.daySweeps === s1.daySweeps);
+  check('容量满后 dayCounters.size 仍为上限（真 bounded）', dayCounters.size === 5);
+  check('overflow 计数在洪峰下持续累计', (overflowState.day?.count ?? 0) >= 30);
+
+  // 3) 已存在 bucket 的计数不因容量治理被重置
+  const firstKey = `${ipBucketKey('10.61.0.1')}:day`;
+  const beforeFloodCount = dayCounters.get(firstKey)?.count ?? -1;
+  check('最早创建的 bucket 在洪峰后仍存在且计数保留', beforeFloodCount >= 1);
+  await req('/api/ai-titles', { body: titlesBody(1), xff: '10.61.0.1' });
+  check('洪峰后原 bucket 继续累加而非被重置', (dayCounters.get(firstKey)?.count ?? 0) === beforeFloodCount + 1);
+
+  // 4) global:day 独立存储：永不容量淘汰，预算语义不变
+  const g0 = guard.__globalBudgetForTests().count;
+  await req('/api/ai-titles', { body: titlesBody(1), xff: '10.61.0.1' });
+  check('全局预算独立于容量治理并继续累加', guard.__globalBudgetForTests().count === g0 + 1);
+
+  // 5) minute bucket 同样有容量治理
+  check('minuteWindows 收敛到确定上限', minuteWindows.size <= 4);
+  check('minute overflow 计数存在', overflowState.minute !== null);
+
+  // 6) UTC 跨日清理旧 daily bucket（翻转检测 + 一次性清扫，非每请求）
+  sweepState.day = '2020-01-01';
+  dayCounters.set('ip:stale-day:day', { day: '2020-01-01', count: 9 });
+  const s3 = guard.__sweepStatsForTests();
+  await req('/api/ai-titles', { body: titlesBody(1), xff: '10.61.0.2' });
+  check('UTC 跨日自动清扫旧日 bucket', !dayCounters.has('ip:stale-day:day'));
+  check('跨日清扫恰好发生一次（翻转检测，非每请求扫描）', guard.__sweepStatsForTests().daySweeps === s3.daySweeps + 1);
 }
 
 // ---------- 7. 并发限制（桶级 + 全局） ----------

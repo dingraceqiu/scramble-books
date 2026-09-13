@@ -14,7 +14,16 @@
  *      trust proxy 'loopback' 取最右侧非可信地址 → 永远不是回环；
  *    - 公网直连 5000 时 socket 对端是公网地址，不是可信代理 → req.ip 为真实来源。
  *    仅「socket 对端是回环 且 解析出的客户端 IP 也是回环」（即服务器本机进程直连）
- *    才落入 probe 桶。
+ *    才落入 probe 桶；
+ * 6. 容量治理（bounded memory，防唯一 IP 洪峰）：
+ *    - 分钟窗/日计数 Map 有硬容量上界，上界内【绝不淘汰任何 bucket】——
+ *      活跃用户的 rate/day 计数不可能被容量治理重置，攻击者无法靠制造新 IP
+ *      把自己或他人的计数「洗掉」；
+ *    - 容量满后，新唯一 bucket 落入共享 overflow 计数（独立变量，O(1) 路由，
+ *      按标准桶级限额共享）——不存在每请求 O(n) 全表扫描；
+ *    - 过期条目只在分钟窗/UTC 日「翻转」时做一次 O(n) 清扫（每分钟/每天至多
+ *      一次），平时请求全部 O(1)；
+ *    - 全局 GLM 预算（globalBudget）是独立变量，结构上不可被容量淘汰或清扫。
  *
  * 桶键：有效登录会话 → user:<id>；本机回环 → probe；其余 → ip:<sha256 前 8 位>。
  * 日志只输出接口、限制类型、桶哈希与状态码——绝不记录正文、书名、token、密钥或完整 IP。
@@ -23,6 +32,7 @@
  *   GLM_GUARD_RATE_PER_MIN / GLM_GUARD_DAILY_PER_BUCKET / GLM_GUARD_DAILY_GLOBAL /
  *   GLM_GUARD_CONCURRENCY_PER_BUCKET / GLM_GUARD_CONCURRENCY_GLOBAL /
  *   GLM_GUARD_PROBE_RATE_PER_MIN / GLM_GUARD_PROBE_DAILY /
+ *   GLM_GUARD_MAX_MINUTE_BUCKETS / GLM_GUARD_MAX_DAY_BUCKETS /
  *   GLM_AI_TITLES_MAX_ITEMS / GLM_AI_TITLES_ITEM_CHARS / GLM_AI_TITLES_TOTAL_CHARS /
  *   GLM_KP_MAX_ITEMS / GLM_KP_ITEM_CHARS / GLM_KP_TOTAL_CHARS
  */
@@ -40,6 +50,8 @@ export interface AbuseGuardConfig {
   concurrencyGlobal: number;
   probeRatePerMin: number;
   probeDaily: number;
+  maxMinuteBuckets: number;
+  maxDayBuckets: number;
   aiTitlesMaxItems: number;
   aiTitlesItemChars: number;
   aiTitlesTotalChars: number;
@@ -64,6 +76,8 @@ export function loadAbuseGuardConfig(): AbuseGuardConfig {
     concurrencyGlobal: intEnv('GLM_GUARD_CONCURRENCY_GLOBAL', 16),
     probeRatePerMin: intEnv('GLM_GUARD_PROBE_RATE_PER_MIN', 6),
     probeDaily: intEnv('GLM_GUARD_PROBE_DAILY', 20),
+    maxMinuteBuckets: intEnv('GLM_GUARD_MAX_MINUTE_BUCKETS', 16384),
+    maxDayBuckets: intEnv('GLM_GUARD_MAX_DAY_BUCKETS', 8192),
     aiTitlesMaxItems: intEnv('GLM_AI_TITLES_MAX_ITEMS', 8),
     aiTitlesItemChars: intEnv('GLM_AI_TITLES_ITEM_CHARS', 1500),
     aiTitlesTotalChars: intEnv('GLM_AI_TITLES_TOTAL_CHARS', 20000),
@@ -75,29 +89,7 @@ export function loadAbuseGuardConfig(): AbuseGuardConfig {
 
 let config: AbuseGuardConfig = loadAbuseGuardConfig();
 
-/** 仅测试使用：覆盖配置并清空全部计数状态 */
-export function __configureAbuseGuardForTests(partial: Partial<AbuseGuardConfig>): void {
-  config = { ...loadAbuseGuardConfig(), ...partial };
-  resetAbuseGuardForTests();
-}
-
-/** 仅测试使用：清空全部计数状态（分钟窗/日计数/并发） */
-export function resetAbuseGuardForTests(): void {
-  minuteWindows.clear();
-  dayCounters.clear();
-  concurrency.clear();
-  lastSweepAt = 0;
-}
-
-/** 仅测试使用：暴露内部计数 Map，供 GC 回归注入/检查 stale 条目 */
-export function __abuseGuardInternalsForTests(): {
-  minuteWindows: Map<string, WindowCounter>;
-  dayCounters: Map<string, DayCounter>;
-} {
-  return { minuteWindows, dayCounters };
-}
-
-// ---------- 状态 ----------
+// ---------- 状态（有界） ----------
 
 interface WindowCounter {
   winStart: number;
@@ -107,40 +99,106 @@ interface DayCounter {
   day: string;
   count: number;
 }
+interface BumpResult {
+  ok: boolean;
+  retryAfterSec: number;
+  count: number;
+}
 
 const minuteWindows = new Map<string, WindowCounter>();
 const dayCounters = new Map<string, DayCounter>();
 const concurrency = new Map<string, number>();
 
+/** 全局 GLM 预算独立存储：结构上不可被容量淘汰，也不参与任何清扫 */
+let globalBudget: DayCounter = { day: '', count: 0 };
+
+/** overflow 共享计数（容量满后新唯一 bucket 的去处；独立变量，O(1)，不占 Map 槽位） */
+const overflowState: { minute: WindowCounter | null; day: DayCounter | null } = {
+  minute: null,
+  day: null,
+};
+
+/** 翻转检测指针：与当前窗口不一致时做一次 O(n) 清扫（每分钟/每天至多一次） */
+const sweepState = { minuteWin: -1, day: '' };
+
+const sweepStats = { minuteSweeps: 0, daySweeps: 0 };
+
+function minuteWinStart(now: number): number {
+  return Math.floor(now / 60000) * 60000;
+}
+
 function dayKeyUtc(now: number): string {
   return new Date(now).toISOString().slice(0, 10);
 }
 
-function bumpMinute(mapKey: string, limit: number, now: number): { ok: boolean; retryAfterSec: number; count: number } {
-  const winStart = Math.floor(now / 60000) * 60000;
-  const w = minuteWindows.get(mapKey);
-  if (!w || w.winStart !== winStart) {
-    minuteWindows.set(mapKey, { winStart, count: 1 });
-    return { ok: true, retryAfterSec: 0, count: 1 };
+function secsUntil(winEndMs: number, now: number): number {
+  return Math.max(1, Math.ceil((winEndMs - now) / 1000));
+}
+
+/** 分钟窗翻转清扫：删除所有非当前窗口条目（它们已不可能再命中） */
+function sweepMinuteWindows(current: number): void {
+  for (const [k, w] of minuteWindows) {
+    if (w.winStart !== current) minuteWindows.delete(k);
+  }
+  sweepState.minuteWin = current;
+  sweepStats.minuteSweeps++;
+}
+
+/** UTC 日翻转清扫：删除所有非今天条目（overflowState.day 由日不一致检查自然重置） */
+function sweepDayCounters(today: string): void {
+  for (const [k, d] of dayCounters) {
+    if (d.day !== today) dayCounters.delete(k);
+  }
+  sweepState.day = today;
+  sweepStats.daySweeps++;
+}
+
+function bumpMinute(bucket: string, limit: number, now: number): BumpResult {
+  const winStart = minuteWinStart(now);
+  if (winStart !== sweepState.minuteWin) sweepMinuteWindows(winStart);
+
+  let w = minuteWindows.get(bucket) ?? undefined;
+  if (!w && minuteWindows.size >= config.maxMinuteBuckets) {
+    // 容量已满：新唯一 bucket 共享 overflow 计数——O(1) 路由，绝不全表扫描，
+    // 也不淘汰任何既有 bucket（活跃用户计数不会被容量治理重置）
+    w = overflowState.minute ?? undefined;
+    if (!w || w.winStart !== winStart) {
+      w = { winStart, count: 0 };
+      overflowState.minute = w;
+    }
+  } else if (!w || w.winStart !== winStart) {
+    w = { winStart, count: 0 };
+    minuteWindows.set(bucket, w);
   }
   w.count += 1;
   if (w.count > limit) {
-    return { ok: false, retryAfterSec: Math.max(1, Math.ceil((winStart + 60000 - now) / 1000)), count: w.count };
+    return { ok: false, retryAfterSec: secsUntil(winStart + 60000, now), count: w.count };
   }
   return { ok: true, retryAfterSec: 0, count: w.count };
 }
 
-function bumpDay(mapKey: string, limit: number, now: number): { ok: boolean; retryAfterSec: number; count: number } {
+function bumpDay(bucket: string, limit: number, now: number): BumpResult {
   const day = dayKeyUtc(now);
-  const d = dayCounters.get(mapKey);
-  if (!d || d.day !== day) {
-    dayCounters.set(mapKey, { day, count: 1 });
-    return { ok: true, retryAfterSec: 0, count: 1 };
+  if (day !== sweepState.day) sweepDayCounters(day);
+
+  let d = dayCounters.get(bucket) ?? undefined;
+  if (!d && dayCounters.size >= config.maxDayBuckets) {
+    d = overflowState.day ?? undefined;
+    if (!d || d.day !== day) {
+      d = { day, count: 0 };
+      overflowState.day = d;
+    }
+  } else if (!d || d.day !== day) {
+    d = { day, count: 0 };
+    dayCounters.set(bucket, d);
   }
   d.count += 1;
   if (d.count > limit) {
-    const midnight = Date.parse(`${day}T00:00:00.000Z`) + 24 * 3600 * 1000;
-    return { ok: false, retryAfterSec: Math.max(1, Math.ceil((midnight - now) / 1000)), count: d.count };
+    return {
+      ok: false,
+      retryAfterSec: secsUntil(Date.parse(`${day}T00:00:00.000Z`) + 24 * 3600 * 1000, now),
+      count: d.count,
+    };
   }
   return { ok: true, retryAfterSec: 0, count: d.count };
 }
@@ -156,6 +214,46 @@ function releaseConcurrency(mapKey: string): void {
   const cur = concurrency.get(mapKey) ?? 0;
   if (cur <= 1) concurrency.delete(mapKey);
   else concurrency.set(mapKey, cur - 1);
+}
+
+/** 仅测试使用：覆盖配置并清空全部计数状态 */
+export function __configureAbuseGuardForTests(partial: Partial<AbuseGuardConfig>): void {
+  config = { ...loadAbuseGuardConfig(), ...partial };
+  resetAbuseGuardForTests();
+}
+
+/** 仅测试使用：清空全部计数状态 */
+export function resetAbuseGuardForTests(): void {
+  minuteWindows.clear();
+  dayCounters.clear();
+  concurrency.clear();
+  globalBudget = { day: '', count: 0 };
+  overflowState.minute = null;
+  overflowState.day = null;
+  sweepState.minuteWin = -1;
+  sweepState.day = '';
+  sweepStats.minuteSweeps = 0;
+  sweepStats.daySweeps = 0;
+}
+
+/** 仅测试使用：暴露内部计数结构（Map / 翻转指针 / overflow 状态） */
+export function __abuseGuardInternalsForTests(): {
+  minuteWindows: Map<string, WindowCounter>;
+  dayCounters: Map<string, DayCounter>;
+  sweepState: { minuteWin: number; day: string };
+  overflowState: { minute: WindowCounter | null; day: DayCounter | null };
+} {
+  return { minuteWindows, dayCounters, sweepState, overflowState };
+}
+
+/** 仅测试使用：读取全局 GLM 预算状态 */
+export function __globalBudgetForTests(): { day: string; count: number } {
+  return { ...globalBudget };
+}
+
+/** 仅测试使用：读取清扫次数统计 */
+export function __sweepStatsForTests(): { minuteSweeps: number; daySweeps: number } {
+  return { ...sweepStats };
 }
 
 // ---------- 桶识别 ----------
@@ -214,7 +312,6 @@ export function glmGuard(endpoint: GlmEndpoint): (req: Request, res: Response, n
     const bucket = bucketForRequest(req);
     const isProbe = bucket === 'probe';
     const now = Date.now();
-    maybeSweepStale(now);
 
     // 1. 每分钟频率（探针独立阈值）
     const rate = bumpMinute(`${bucket}:rate`, isProbe ? config.probeRatePerMin : config.ratePerMin, now);
@@ -276,38 +373,21 @@ function logReject(endpoint: string, limit: string, bucket: string, status: numb
  *   「不会真正调用 GLM」的路径绝不消耗全局额度；
  * - consume 成功后才 fetch 上游——上游失败也算一次 attempt；
  * - 额度耗尽在 fetch 之前抛出（零上游调用），含轮换探针在内的所有调用方诚实失败。
+ * 预算为独立变量：不参与容量治理与翻转清扫，结构上不可被淘汰。
  */
 export function consumeGlmCallBudget(): { ok: boolean; retryAfterSec: number } {
   const now = Date.now();
-  maybeSweepStale(now);
-  const r = bumpDay('global:day', config.dailyGlobal, now);
-  return { ok: r.ok, retryAfterSec: r.retryAfterSec };
-}
-
-// ---------- stale bucket GC（低复杂度 TTL 清扫，防唯一 IP 撑爆内存） ----------
-
-const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
-/** 超过该规模立即清扫，不等间隔（恶意唯一 IP 洪峰兜底） */
-const SWEEP_SIZE_THRESHOLD = 4096;
-let lastSweepAt = 0;
-
-/** 清扫过期桶：分钟窗保留 2 分钟内的；日计数只保留今天（global:day 由 bumpDay 按日翻新）。 */
-export function sweepStaleBuckets(now: number): void {
-  const today = dayKeyUtc(now);
-  for (const [k, w] of minuteWindows) {
-    if (now - w.winStart > 2 * 60000) minuteWindows.delete(k);
+  const day = dayKeyUtc(now);
+  if (day !== sweepState.day) sweepDayCounters(day);
+  if (globalBudget.day !== day) globalBudget = { day, count: 0 };
+  globalBudget.count += 1;
+  if (globalBudget.count > config.dailyGlobal) {
+    return {
+      ok: false,
+      retryAfterSec: secsUntil(Date.parse(`${day}T00:00:00.000Z`) + 24 * 3600 * 1000, now),
+    };
   }
-  for (const [k, d] of dayCounters) {
-    if (k !== 'global:day' && d.day !== today) dayCounters.delete(k);
-  }
-  lastSweepAt = now;
-}
-
-function maybeSweepStale(now: number): void {
-  if (now - lastSweepAt < SWEEP_INTERVAL_MS && minuteWindows.size + dayCounters.size < SWEEP_SIZE_THRESHOLD) {
-    return;
-  }
-  sweepStaleBuckets(now);
+  return { ok: true, retryAfterSec: 0 };
 }
 
 // ---------- 内容校验（413/400，全部发生在 GLM 上游调用之前） ----------
